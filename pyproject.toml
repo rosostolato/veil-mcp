@@ -28,7 +28,7 @@ Issues = "https://github.com/rosostolato/veil-mcp/issues"
 [project.optional-dependencies]
 gcp = ["google-cloud-secret-manager>=2.20,<3"]
 firestore = ["google-cloud-firestore>=2.16,<3"]
-dev = ["pytest>=8.2,<9", "pytest-timeout>=2.3,<3", "mypy>=1.10", "ruff>=0.5"]
+dev = ["pytest>=9.0.3", "pytest-timeout>=2.3", "mypy>=1.10", "ruff>=0.5"]
 
 [project.scripts]
 veil = "veil.__main__:main"
