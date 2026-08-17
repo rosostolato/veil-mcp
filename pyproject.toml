@@ -1,0 +1,76 @@
+[project]
+name = "veil-mcp"
+version = "0.1.0"
+description = "An MCP server and secure input broker that lets an agent place a credential without ever receiving it."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Eduardo Rosostolato" }]
+keywords = ["mcp", "secrets", "security", "credentials", "ai-agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+]
+# The core broker has zero runtime dependencies on purpose: it is the trusted
+# computing base for credential material (SPEC.md §42).
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/rosostolato/veil-mcp"
+Repository = "https://github.com/rosostolato/veil-mcp"
+Issues = "https://github.com/rosostolato/veil-mcp/issues"
+
+[project.optional-dependencies]
+gcp = ["google-cloud-secret-manager>=2.20,<3"]
+firestore = ["google-cloud-firestore>=2.16,<3"]
+dev = ["pytest>=8.2,<9", "pytest-timeout>=2.3,<3", "mypy>=1.10", "ruff>=0.5"]
+
+[project.scripts]
+veil = "veil.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/veil"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+timeout = 120
+markers = [
+  "security: adversarial and leakage tests that gate a release (SPEC.md §38)",
+  "slow: long-running stress tests",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S", "RUF"]
+ignore = [
+  "S101",     # asserts are how tests assert
+  "RUF002",   # en dashes are intentional in prose docstrings
+  "S105",     # flags enum member NAMES like SECRET_RECEIVED, not real secrets
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B011"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["veil"]
+mypy_path = "src"
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["google.*"]
+ignore_missing_imports = true

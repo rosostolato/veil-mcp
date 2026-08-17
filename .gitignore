@@ -1,0 +1,17 @@
+.remember/
+.claude/
+uv-receipt.json
+
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+sbom.json
+.env
+.env.*
+!.env.example

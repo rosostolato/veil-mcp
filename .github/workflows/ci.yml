@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv pip install --system -e ".[dev]"
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Type check
+        run: mypy
+      - name: Unit and integration tests
+        run: pytest -q
+
+  security:
+    # SPEC.md §37/§38: the adversarial suite gates every release. No warning-only mode.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv pip install --system -e ".[dev]"
+      - name: Security suite
+        run: pytest tests/security -q -p no:randomly
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Dependency vulnerability scan
+        run: |
+          uv pip install --system pip-audit
+          # The core has no runtime dependencies; this guards the dev and extra sets.
+          uv pip install --system -e ".[dev,gcp,firestore]"
+          pip-audit --strict
+      - name: SBOM
+        run: |
+          uv pip install --system cyclonedx-bom
+          cyclonedx-py environment --output-format json --outfile sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
