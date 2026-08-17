@@ -61,8 +61,9 @@ jobs:
       - name: Install everything, including optional provider SDKs
         run: uv pip install -e ".[dev,gcp,firestore]" pip-audit cyclonedx-bom
       - name: Dependency vulnerability scan
-        # The core has no runtime dependencies; this guards the dev and extra sets.
-        run: uv run pip-audit --strict
+        # The core has no runtime dependencies; this guards the dev and extra
+        # sets. --skip-editable leaves out Veil itself, which is not on PyPI.
+        run: uv run pip-audit --strict --skip-editable
       - name: SBOM
         run: uv run cyclonedx-py environment .venv --output-format json --outfile sbom.json
       - uses: actions/upload-artifact@v4
