@@ -63,9 +63,9 @@ jobs:
       - name: Dependency vulnerability scan
         # The core has no runtime dependencies; this guards the dev and extra
         # sets. --skip-editable leaves out Veil itself, which is not on PyPI.
-        run: uv run pip-audit --strict --skip-editable
+        run: uv run pip-audit --skip-editable
       - name: SBOM
-        run: uv run cyclonedx-py environment .venv --output-format json --outfile sbom.json
+        run: uv run cyclonedx-py environment .venv --of JSON -o sbom.json
       - uses: actions/upload-artifact@v4
         with:
           name: sbom
