@@ -25,9 +25,8 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: |
-          uv venv --python ${{ matrix.python-version }}
-          uv pip install -e ".[dev]"
+        # setup-uv already created and activated a venv for this Python.
+        run: uv pip install -e ".[dev]"
       - name: Lint
         run: |
           uv run ruff check .
@@ -47,9 +46,7 @@ jobs:
           enable-cache: true
           python-version: "3.13"
       - name: Install
-        run: |
-          uv venv --python 3.13
-          uv pip install -e ".[dev]"
+        run: uv pip install -e ".[dev]"
       - name: Security suite
         run: uv run pytest tests/security -q
 
@@ -62,9 +59,7 @@ jobs:
           enable-cache: true
           python-version: "3.13"
       - name: Install everything, including optional provider SDKs
-        run: |
-          uv venv --python 3.13
-          uv pip install -e ".[dev,gcp,firestore]" pip-audit cyclonedx-bom
+        run: uv pip install -e ".[dev,gcp,firestore]" pip-audit cyclonedx-bom
       - name: Dependency vulnerability scan
         # The core has no runtime dependencies; this guards the dev and extra sets.
         run: uv run pip-audit --strict
