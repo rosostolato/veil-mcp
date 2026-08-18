@@ -32,6 +32,9 @@ dev = ["pytest>=9.0.3", "pytest-timeout>=2.3", "mypy>=1.10", "ruff>=0.5"]
 
 [project.scripts]
 veil = "veil.__main__:main"
+# Alias matching the distribution name, so `uvx veil-mcp` works the way `npx`
+# does for TypeScript MCP servers — the convention MCP clients expect.
+veil-mcp = "veil.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

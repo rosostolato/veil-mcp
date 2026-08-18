@@ -17,6 +17,77 @@ Implemented from [`SPEC.md`](SPEC.md).
 
 ---
 
+## Install
+
+Veil is a stdio MCP server, so you do not run it yourself — your MCP client starts it. The
+usual Python-MCP pattern applies: `uvx` fetches and runs it in a throwaway environment,
+exactly as `npx -y` does for TypeScript servers. Requires [uv](https://docs.astral.sh/uv/)
+and Python 3.11+.
+
+### Claude Code
+
+```bash
+claude mcp add veil -e VEIL_ENV_ALLOWED_ROOTS="$PWD" -- \
+  uvx --from git+https://github.com/rosostolato/veil-mcp veil-mcp serve
+```
+
+Add `-s project` to record it in the repository's `.mcp.json` instead of your own config.
+
+### Any other client (Claude Desktop, Cursor, Windsurf, VS Code, Zed…)
+
+Drop this into the client's MCP configuration file — the `mcpServers` block is the same
+shape everywhere:
+
+```json
+{
+  "mcpServers": {
+    "veil": {
+      "command": "uvx",
+      "args": [
+        "--from", "git+https://github.com/rosostolato/veil-mcp",
+        "veil-mcp", "serve"
+      ],
+      "env": {
+        "VEIL_ENV_ALLOWED_ROOTS": "/absolute/path/to/your/project"
+      }
+    }
+  }
+}
+```
+
+Once Veil is on PyPI, the `--from git+…` pair disappears and the invocation becomes
+`uvx veil-mcp serve`. Cloud destinations need their extras — `veil-mcp[gcp]`,
+`veil-mcp[firestore]`, or both — appended to whichever spec you use.
+
+Prefer a permanent install to an ephemeral one:
+
+```bash
+uv tool install "veil-mcp[gcp] @ git+https://github.com/rosostolato/veil-mcp"
+# then use `veil-mcp serve` as the command, with no uvx
+```
+
+**Set `VEIL_ENV_ALLOWED_ROOTS`.** The `.env` adapter refuses to write outside those
+directories, and it defaults only to the server's working directory. Everything else is
+optional — see [Configuration](#configuration).
+
+### First run
+
+Ask your agent for something like *"store my Stripe test key in .env"*. What happens:
+
+1. The agent calls `secret.store` describing **where** the credential goes. It sends no
+   value, because the tool has no field that could carry one.
+2. Veil opens its own window on your machine showing the credential name, destination,
+   project, environment, operation and risk. The agent does not receive that link.
+3. You type the value into a masked field. Medium- and high-risk operations ask for a
+   second confirmation, after entry and before the write.
+4. Veil writes it and tells the agent `STORED` plus a destination reference — never the
+   value.
+
+Veil's own stderr carries structured audit JSON. Nothing else is expected of you in the
+terminal.
+
+---
+
 ## What Veil solves
 
 It removes an entire class of failures caused by the agent **knowing** the secret.
@@ -186,17 +257,21 @@ Stated plainly, because a security tool that oversells itself is worse than none
 ## Local development
 
 ```bash
+git clone https://github.com/rosostolato/veil-mcp && cd veil-mcp
 uv venv
-uv pip install -e ".[dev]"
-
-# run the server the way an MCP client would
-uv run veil serve
-
-# with optional providers
 uv pip install -e ".[dev,gcp,firestore]"
+
+# drive it the way a client would
+uv run veil serve
 ```
 
-Configuration is read from Veil's own environment — never from tool arguments:
+To point a client at your checkout, use `/path/to/veil-mcp/.venv/bin/veil-mcp` as the
+command instead of `uvx`.
+
+## Configuration
+
+Configuration is read from Veil's own environment — never from tool arguments, so an agent
+cannot relax a policy:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -209,16 +284,6 @@ Configuration is read from Veil's own environment — never from tool arguments:
 | `VEIL_ENV_ALLOWED_ROOTS` | current directory | Roots the `.env` adapter may write inside. |
 | `VEIL_ALLOW_GIT_TRACKED_ENV` | `false` | Permit writing into a git-tracked env file. |
 | `VEIL_ENABLED_ADAPTERS` | all | Comma-separated allowlist. |
-
-### MCP client configuration
-
-```json
-{
-  "mcpServers": {
-    "veil": { "command": "uv", "args": ["run", "veil", "serve"] }
-  }
-}
-```
 
 ## Tests
 
