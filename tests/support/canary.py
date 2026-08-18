@@ -14,10 +14,17 @@ from __future__ import annotations
 
 import os
 import secrets
+import string
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from veil.redaction import derivations
+
+_ALPHABET = string.ascii_letters + string.digits
+
+
+def _chunk(length: int) -> str:
+    return "".join(secrets.choice(_ALPHABET) for _ in range(length))
 
 
 @dataclass(frozen=True)
@@ -26,11 +33,20 @@ class Canary:
 
     @classmethod
     def new(cls, label: str = "") -> Canary:
-        # The recognisable marker sits in the middle, and both ends are random,
-        # so the 8-byte prefix/suffix fragment searches of SPEC.md §23 cannot
-        # collide with the marker itself or with an unrelated canary.
-        middle = f"VEIL_CANARY_{label}_" if label else "VEIL_CANARY_"
-        return cls(f"{secrets.token_hex(6)}{middle}{secrets.token_hex(8)}")
+        """Build a canary whose fragment searches cannot produce false positives.
+
+        SPEC.md §23 requires searching for the first and last 8 bytes, which
+        means those 8 bytes must be unmistakable. Two properties make them so:
+
+        * both ends are random and carry an uppercase letter, so a fragment can
+          never collide with the lowercase hex of a sha256 digest or with an
+          unrelated canary;
+        * the ``VEIL_CANARY_`` marker sits in the middle, immediately followed
+          by alphanumerics, so the product's own credential-shape screen
+          recognises the value as credential material.
+        """
+
+        return cls(f"Q{_chunk(7)}VEIL_CANARY_{label}{_chunk(10)}Z")
 
     @property
     def raw(self) -> bytes:
