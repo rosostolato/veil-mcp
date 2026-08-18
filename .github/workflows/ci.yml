@@ -46,7 +46,8 @@ jobs:
           enable-cache: true
           python-version: "3.13"
       - name: Install
-        run: uv pip install -e ".[dev]"
+        # Extras included so the real-SDK contract tests run instead of skipping.
+        run: uv pip install -e ".[dev,gcp,firestore]"
       - name: Security suite
         run: uv run pytest tests/security -q
 

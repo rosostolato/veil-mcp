@@ -172,6 +172,9 @@ Stated plainly, because a security tool that oversells itself is worse than none
   read Veil's console output, list the browser's argv, or scan loopback ports.
 - **Veil does not audit the destination.** If you authorize a credential into a Firestore
   document, Veil writes it there and tells you it is a bad idea; it does not stop you.
+- **Timeouts are provider-level.** Veil cannot cancel a blocking SDK call from
+  outside it, so each adapter passes an explicit timeout to the provider. A destination
+  SDK that ignores its own timeout can still hold a request — and its secret — open.
 - **Preflight is best-effort.** A provider that is unreachable at preflight is reported as
   unavailable rather than guessed at.
 - **Crash semantics.** A crash between the provider write and the response can leave a

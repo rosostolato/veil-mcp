@@ -139,7 +139,7 @@ class FirestoreAdapter(SecretDestinationAdapter):
                 message="Firestore is not configured on this machine.",
             )
         try:
-            document = self._document(client, target).get()
+            document = self._document(client, target).get(timeout=self._timeout)
             exists = bool(getattr(document, "exists", False))
             data = document.to_dict() if exists and hasattr(document, "to_dict") else None
             field_present = bool(data and (target.field("field") or "") in data)
@@ -172,7 +172,7 @@ class FirestoreAdapter(SecretDestinationAdapter):
         field_name = target.field("field") or ""
 
         if operation is WriteMode.CREATE:
-            snapshot = reference.get()
+            snapshot = reference.get(timeout=self._timeout)
             data = snapshot.to_dict() if getattr(snapshot, "exists", False) else None
             if data and field_name in data:
                 raise adapter_error(
@@ -180,7 +180,7 @@ class FirestoreAdapter(SecretDestinationAdapter):
                     "The document field already exists; a replace operation is required.",
                 )
 
-        reference.set({field_name: secret.as_text()}, merge=True)
+        reference.set({field_name: secret.as_text()}, merge=True, timeout=self._timeout)
         return StoreResult(
             stored=True,
             destination_ref=(
@@ -208,6 +208,10 @@ class FirestoreAdapter(SecretDestinationAdapter):
             mapped = mapping[status_value]
             return PublicError(mapped[0], mapped[1])
         return await super().sanitize_error(error)
+
+    @property
+    def _timeout(self) -> float:
+        return self.config.adapter_timeout_seconds
 
     def _document(self, client: Any, target: NormalizedTarget) -> Any:
         return client.collection(target.field("collection")).document(target.field("document"))

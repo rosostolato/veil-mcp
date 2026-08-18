@@ -5,6 +5,11 @@ official SDK: never in a URL, never in an argv, never in a shell string
 (SEC-007, SEC-008, SEC-009). The SDK is imported lazily so that installations
 that only use the `.env` adapter do not carry it in their trusted computing
 base, and so tests can inject a fake client.
+
+Every call passes an explicit ``timeout``. The broker's own ``asyncio.wait_for``
+cannot interrupt a blocking gRPC call — there is no await point inside it — so
+the provider-level timeout is what actually bounds a hung destination, and with
+it the lifetime of the secret in memory.
 """
 
 from __future__ import annotations
@@ -131,7 +136,7 @@ class GcpSecretManagerAdapter(SecretDestinationAdapter):
             )
         name = target.field("resource_name") or ""
         try:
-            client.get_secret(request={"name": name})
+            client.get_secret(request={"name": name}, timeout=self._timeout)
         except Exception:
             return PreflightResult(ok=True, exists=False, notes=("The secret does not exist yet.",))
         return PreflightResult(
@@ -174,18 +179,20 @@ class GcpSecretManagerAdapter(SecretDestinationAdapter):
                     "parent": parent,
                     "secret_id": secret_id,
                     "secret": {"replication": {"automatic": {}}},
-                }
+                },
+                timeout=self._timeout,
             )
 
         previous_versions: list[str] = []
         if operation is WriteMode.REPLACE:
-            previous_versions = _enabled_version_names(client, resource_name)
+            previous_versions = _enabled_version_names(client, resource_name, self._timeout)
 
         version = client.add_secret_version(
             request={
                 "parent": resource_name,
                 "payload": {"data": secret.as_bytes()},
-            }
+            },
+            timeout=self._timeout,
         )
         version_name = getattr(version, "name", None) or f"{resource_name}/versions/latest"
 
@@ -195,7 +202,7 @@ class GcpSecretManagerAdapter(SecretDestinationAdapter):
             if previous == version_name:
                 continue
             try:
-                client.disable_secret_version(request={"name": previous})
+                client.disable_secret_version(request={"name": previous}, timeout=self._timeout)
                 disabled += 1
             except Exception:
                 # Surfaced as a count in the result; the provider's own message
@@ -240,6 +247,10 @@ class GcpSecretManagerAdapter(SecretDestinationAdapter):
 
     # -- client ------------------------------------------------------------
 
+    @property
+    def _timeout(self) -> float:
+        return self.config.adapter_timeout_seconds
+
     def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
@@ -257,9 +268,9 @@ class GcpSecretManagerAdapter(SecretDestinationAdapter):
         return self._client
 
 
-def _enabled_version_names(client: Any, resource_name: str) -> list[str]:
+def _enabled_version_names(client: Any, resource_name: str, timeout: float) -> list[str]:
     try:
-        versions = client.list_secret_versions(request={"parent": resource_name})
+        versions = client.list_secret_versions(request={"parent": resource_name}, timeout=timeout)
     except Exception:
         return []
     names: list[str] = []

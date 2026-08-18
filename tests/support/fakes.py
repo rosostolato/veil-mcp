@@ -215,13 +215,13 @@ class FakeSecretManagerClient:
         self.disabled: list[str] = []
         self.requests: list[dict[str, Any]] = []
 
-    def get_secret(self, request: dict[str, Any]) -> Any:
+    def get_secret(self, request: dict[str, Any], timeout: float | None = None) -> Any:
         name = request["name"]
         if name not in self.existing:
             raise StatusError(404, "not found")
         return type("Secret", (), {"name": name})()
 
-    def create_secret(self, request: dict[str, Any]) -> Any:
+    def create_secret(self, request: dict[str, Any], timeout: float | None = None) -> Any:
         self.requests.append({"method": "create_secret", "parent": request["parent"]})
         name = f"{request['parent']}/secrets/{request['secret_id']}"
         if name in self.existing:
@@ -229,7 +229,7 @@ class FakeSecretManagerClient:
         self.existing.add(name)
         return type("Secret", (), {"name": name})()
 
-    def add_secret_version(self, request: dict[str, Any]) -> Any:
+    def add_secret_version(self, request: dict[str, Any], timeout: float | None = None) -> Any:
         if self.fail is not None:
             raise self.fail
         parent = request["parent"]
@@ -241,10 +241,12 @@ class FakeSecretManagerClient:
         self.requests.append({"method": "add_secret_version", "parent": parent})
         return version
 
-    def list_secret_versions(self, request: dict[str, Any]) -> list[FakeSecretVersion]:
+    def list_secret_versions(
+        self, request: dict[str, Any], timeout: float | None = None
+    ) -> list[FakeSecretVersion]:
         return list(self.versions.get(request["parent"], []))
 
-    def disable_secret_version(self, request: dict[str, Any]) -> Any:
+    def disable_secret_version(self, request: dict[str, Any], timeout: float | None = None) -> Any:
         self.disabled.append(request["name"])
         return None
 
@@ -263,10 +265,10 @@ class FakeDocumentReference:
         self._store = store
         self._path = path
 
-    def get(self) -> FakeDocumentSnapshot:
+    def get(self, timeout: float | None = None) -> FakeDocumentSnapshot:
         return FakeDocumentSnapshot(self._store.get(self._path))
 
-    def set(self, data: dict[str, Any], merge: bool = False) -> None:
+    def set(self, data: dict[str, Any], merge: bool = False, timeout: float | None = None) -> None:
         current = self._store.setdefault(self._path, {})
         if not merge:
             current.clear()
