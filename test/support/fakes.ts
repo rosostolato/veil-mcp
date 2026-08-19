@@ -169,6 +169,30 @@ export class SlowAdapter extends RecordingAdapter {
   }
 }
 
+/** A store() the test finishes by hand, to drive late-completion races. */
+export class DeferredAdapter extends RecordingAdapter {
+  override readonly id = 'deferred-store';
+  override readonly displayName = 'Deferred Store';
+
+  #resolve: ((result: StoreResult) => void) | null = null;
+
+  override store(_secret: SecretBuffer, target: NormalizedTarget): Promise<StoreResult> {
+    return new Promise<StoreResult>((resolve) => {
+      this.#resolve = (result): void => {
+        this.targets.push(target);
+        resolve(result);
+      };
+    });
+  }
+
+  /** Complete the pending write, as a provider eventually would. */
+  finish(result: StoreResult = { stored: true, destinationRef: 'deferred/1' }): void {
+    const resolve = this.#resolve;
+    this.#resolve = null;
+    resolve?.(result);
+  }
+}
+
 /** An adapter returning a shape the broker must refuse. */
 export class MalformedResultAdapter extends RecordingAdapter {
   override readonly id = 'malformed';

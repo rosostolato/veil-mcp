@@ -140,14 +140,16 @@ export class SecretRequest {
   whenTerminal(timeoutMs: number): Promise<void> {
     if (isTerminal(this.state)) return Promise.resolve();
     return new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        resolve();
-      }, timeoutMs);
-      timer.unref?.();
-      this.#terminalResolvers.push(() => {
+      // The waiter is dropped when it times out: repeated polling on a
+      // long-lived request must not accumulate resolvers for its lifetime.
+      const waiter = (): void => {
         clearTimeout(timer);
+        this.#terminalResolvers = this.#terminalResolvers.filter((entry) => entry !== waiter);
         resolve();
-      });
+      };
+      const timer = setTimeout(waiter, timeoutMs);
+      timer.unref?.();
+      this.#terminalResolvers.push(waiter);
     });
   }
 
@@ -179,7 +181,8 @@ export class SecretBroker {
     options: { logger?: AuditLogger; clock?: () => number } = {},
   ) {
     this.log = options.logger ?? getLogger();
-    this.#clock = options.clock ?? ((): number => Date.now() / 1000);
+    // Monotonic, so a wall-clock adjustment cannot extend a request's life.
+    this.#clock = options.clock ?? ((): number => performance.now() / 1000);
     this.log.setTripwire((text) => this.containsLiveSecret(text));
   }
 
@@ -492,7 +495,11 @@ export class SecretBroker {
   shutdown(): void {
     for (const request of [...this.#active.values()]) {
       if (!isTerminal(request.state)) {
-        this.#finish(request, RequestState.CANCELLED, { reason: 'shutdown' });
+        // A request already writing to its destination can only end as STORED
+        // or FAILED; we cannot know that the write succeeded, so it is FAILED.
+        const state =
+          request.state === RequestState.EXECUTING ? RequestState.FAILED : RequestState.CANCELLED;
+        this.#finish(request, state, { reason: 'shutdown' });
       }
       this.#destroySecret(request);
     }
@@ -582,11 +589,36 @@ export class SecretBroker {
     return count;
   }
 
+  /**
+   * Move a request to a terminal state, once.
+   *
+   * Terminal is forever (SPEC.md §14). A late outcome — an adapter write that
+   * lands after the request was cancelled or expired — must not resurrect the
+   * request, and must not emit a second, contradictory audit record.
+   */
   #finish(
     request: SecretRequest,
     state: RequestState,
     options: { reason?: string; result?: StoreResult; error?: PublicError } = {},
   ): void {
+    if (isTerminal(request.state)) {
+      this.log.security('late_outcome_discarded', {
+        request_id: request.requestId,
+        state: request.state,
+        result: state,
+        reason: options.reason ?? '',
+      });
+      this.#destroySecret(request);
+      return;
+    }
+    if (!ALLOWED_TRANSITIONS[request.state].has(state)) {
+      this.log.security('invalid_terminal_transition', {
+        request_id: request.requestId,
+        from_state: request.state,
+        to_state: state,
+      });
+      state = RequestState.FAILED;
+    }
     request.state = state;
     request.result = options.result ?? null;
     request.error = options.error ?? null;

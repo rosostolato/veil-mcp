@@ -16,7 +16,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { constants as fsConstants, promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs, realpathSync } from 'node:fs';
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -133,9 +133,12 @@ export class EnvFileAdapter extends SecretDestinationAdapter {
       throw adapterError(ErrorCode.INVALID_TARGET, 'The destination path is not a file.');
     }
 
-    // Resolve the *parent* so symlinked directories cannot escape a root, while
-    // leaving the final component unresolved for the symlink check.
-    const parent = resolve(parsed.dir);
+    // Canonicalise the *parent*, following symlinks, so a linked directory
+    // cannot point outside a root. `path.resolve` alone is purely lexical and
+    // would happily accept `root/link-to-elsewhere/.env`. The final component
+    // is deliberately left unresolved: it is checked separately, and the write
+    // uses rename, which replaces a link rather than following it.
+    const parent = canonicalDirectory(parsed.dir);
     if (!roots.some((root) => isWithin(parent, root))) {
       throw adapterError(
         ErrorCode.DESTINATION_NOT_PERMITTED,
@@ -143,6 +146,23 @@ export class EnvFileAdapter extends SecretDestinationAdapter {
       );
     }
     return join(parent, parsed.base);
+  }
+
+  /**
+   * Re-check containment immediately before writing.
+   *
+   * Canonicalising at authorization time cannot bind the filesystem: a parent
+   * directory can still be swapped for a symlink afterwards. Repeating the
+   * check here shrinks that window to the moment of the write.
+   */
+  #assertStillInsideRoots(path: string): void {
+    const parent = canonicalDirectory(parse(path).dir);
+    if (!this.config.envAllowedRoots.some((root) => isWithin(parent, root))) {
+      throw adapterError(
+        ErrorCode.DESTINATION_NOT_PERMITTED,
+        'The destination path is outside the directories permitted by policy.',
+      );
+    }
   }
 
   override async validateTarget(target: NormalizedTarget): Promise<ValidationResult> {
@@ -227,6 +247,8 @@ export class EnvFileAdapter extends SecretDestinationAdapter {
     const path = target.fields.path ?? '';
     const key = target.fields.key ?? '';
 
+    this.#assertStillInsideRoots(path);
+
     const stats = await fs.lstat(path).catch(() => null);
     if (stats?.isSymbolicLink()) {
       throw adapterError(
@@ -284,6 +306,30 @@ export class EnvFileAdapter extends SecretDestinationAdapter {
 }
 
 // -- helpers ----------------------------------------------------------------
+
+/**
+ * The canonical form of a directory, following symlinks.
+ *
+ * Missing directories are resolved as far as they exist, so a path under a
+ * directory that has not been created yet is still checked against the real
+ * location of its nearest existing ancestor.
+ */
+export function canonicalDirectory(directory: string): string {
+  const absolute = resolve(directory);
+  let head = absolute;
+  const tail: string[] = [];
+
+  for (;;) {
+    try {
+      return join(realpathSync(head), ...tail.reverse());
+    } catch {
+      const parsed = parse(head);
+      if (parsed.dir === head) return absolute; // reached the filesystem root
+      tail.push(parsed.base);
+      head = parsed.dir;
+    }
+  }
+}
 
 function isWithin(path: string, root: string): boolean {
   if (path === root) return true;

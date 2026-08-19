@@ -88,6 +88,8 @@ shell string, a global, a cache, or anything serialized.
 | Status-code mapping only | `GcpSecretManagerAdapter.sanitizeError` | `provider-errors` › *maps provider status N* |
 | `arbitrary-network` disabled | `AdapterRegistry.register` refuses it | `malicious-agent` › *§16 cannot even be registered* |
 | `.env` symlink/traversal/git rules | `src/adapters/envFile.ts` | `test/envAdapter.test.ts` |
+| Canonical paths (a linked directory cannot escape a root) | `envFile.canonicalDirectory`, re-checked at write time; `config.canonicalRoot` | `audit-findings` › *a symlinked directory cannot escape the allowed roots* |
+| Terminal is forever, even for a late provider answer | `SecretBroker.#finish` | `audit-findings` › *a terminal request stays terminal* |
 | UI headers, masking, PRG, expiry | `ui/render.securityHeaders`, `ui/server` | `test/security/ui/ui.test.ts` |
 | Hostile metadata rendering | `redaction.safeDisplay` + HTML escaping | `test/security/fuzz/fuzz.test.ts` |
 
@@ -109,6 +111,30 @@ build.
 - **Tool names use underscores** (`secret_store`, not `secret.store` as SPEC.md §13 writes
   it) because several MCP clients constrain tool names to `[a-zA-Z0-9_-]`. The contract is
   otherwise the one the spec describes.
+
+## Post-port audit
+
+An audit after the TypeScript port found four defects the ported suite did not cover.
+All are fixed, each with a regression test in `test/security/audit-findings.test.ts`:
+
+1. **A symlinked directory escaped the allowed roots.** `path.resolve` is lexical, unlike
+   Python's `Path.resolve`, so `root/link-to-elsewhere/.env` passed the containment check —
+   and the path shown to the human was not the path that would be written. Paths and
+   configured roots are now canonicalised, and containment is re-checked immediately before
+   the write.
+2. **A terminal request could be resurrected.** A provider answer arriving after the
+   request was cancelled moved it back to `STORED` and emitted a second, contradictory
+   audit record. `#finish` now refuses to leave a terminal state and logs the late outcome.
+   Shutdown during a write ends the request as `FAILED`, which is the only transition
+   SPEC.md §14 permits from `EXECUTING`.
+3. **`safeDisplay` truncated inside surrogate pairs**, emitting lone surrogates into HTML
+   and logs. Truncation now happens on code-point boundaries.
+4. **An oversized chunked body** produced a misleading "no value provided" error and left
+   the socket half-read. It is now drained to a bound and answered with 413.
+
+Three smaller hardening changes went with them: expiry uses a monotonic clock, terminal
+waiters are dropped when they time out, and the browser opener validates the URL and uses
+`explorer.exe` rather than `cmd /c start`, which would re-parse its argument.
 
 ## Known limitations
 

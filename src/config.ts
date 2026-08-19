@@ -6,8 +6,8 @@
  * an agent must not be able to relax a policy (SPEC.md §10).
  */
 
-import { resolve } from 'node:path';
-import { delimiter } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { delimiter, resolve } from 'node:path';
 
 export const DEFAULT_PRODUCTION_MARKERS = ['prod', 'production', 'live', 'prd'] as const;
 export const DEFAULT_STAGING_MARKERS = [
@@ -70,6 +70,22 @@ export interface VeilConfig {
   readonly developmentMarkers: readonly string[];
 }
 
+/**
+ * Canonicalise a configured root, following symlinks.
+ *
+ * The `.env` adapter compares canonical paths, so the roots must be canonical
+ * too — on macOS `/tmp` is a symlink to `/private/tmp`, and a lexical root
+ * would reject every legitimate write beneath it.
+ */
+export function canonicalRoot(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
 export function defaultConfig(overrides: Partial<VeilConfig> = {}): VeilConfig {
   return Object.freeze({
     requestTtlSeconds: 300,
@@ -81,12 +97,14 @@ export function defaultConfig(overrides: Partial<VeilConfig> = {}): VeilConfig {
     uiPort: 0,
     openBrowser: true,
     discloseAuthorizationUrl: false,
-    envAllowedRoots: [process.cwd()],
     allowGitTrackedEnv: false,
     productionMarkers: [...DEFAULT_PRODUCTION_MARKERS],
     stagingMarkers: [...DEFAULT_STAGING_MARKERS],
     developmentMarkers: [...DEFAULT_DEVELOPMENT_MARKERS],
     ...overrides,
+    envAllowedRoots: (overrides.envAllowedRoots ?? [canonicalRoot(process.cwd())]).map(
+      canonicalRoot,
+    ),
   });
 }
 
@@ -106,8 +124,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): VeilConfig 
       ? roots
           .split(delimiter)
           .filter((entry) => entry.length > 0)
-          .map((entry) => resolve(entry))
-      : [process.cwd()],
+          .map((entry) => canonicalRoot(entry))
+      : [canonicalRoot(process.cwd())],
     allowGitTrackedEnv: boolean(env.VEIL_ALLOW_GIT_TRACKED_ENV, false),
     ...(env.VEIL_ENABLED_ADAPTERS
       ? {

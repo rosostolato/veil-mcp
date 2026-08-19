@@ -110,16 +110,19 @@ function isControl(code: number): boolean {
 export function safeDisplay(value: string, maxLength = 256): string {
   const normalized = value.normalize('NFC');
   let out = '';
+  // Iterating by code point, and stopping before the budget is exceeded, keeps
+  // truncation off the middle of a surrogate pair: a lone surrogate is not
+  // valid UTF-8 and would be mangled by anything that re-encodes the output.
   for (const character of normalized) {
     const code = character.codePointAt(0) ?? 0;
-    if (isControl(code) || isBidiOrInvisible(code)) {
-      out += `\\u${code.toString(16).padStart(4, '0')}`;
-    } else {
-      out += character;
+    const rendered =
+      isControl(code) || isBidiOrInvisible(code)
+        ? `\\u${code.toString(16).padStart(4, '0')}`
+        : character;
+    if (out.length + rendered.length > maxLength - 1) {
+      return `${out}…`;
     }
-  }
-  if (out.length > maxLength) {
-    out = `${out.slice(0, maxLength - 1)}…`;
+    out += rendered;
   }
   return out;
 }

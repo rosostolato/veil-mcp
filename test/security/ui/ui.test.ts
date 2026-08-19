@@ -144,7 +144,7 @@ describe('secure UI', () => {
 
   it('reports expiry on the request page', async () => {
     const payload = await harness.callTool('secret_store', storeArgs());
-    harness.broker.get(payload.request_id).expiresAt = Date.now() / 1000 - 1;
+    harness.broker.get(payload.request_id).expiresAt = performance.now() / 1000 - 1;
 
     const response = await harness.get(harness.pathFor(payload));
     expect(response.status).toBe(200);

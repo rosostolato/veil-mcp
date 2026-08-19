@@ -22,12 +22,23 @@ import * as render from './render.js';
 
 export const MAX_BODY_BYTES = MAX_SECRET_BYTES + 4096;
 /**
+ * How much of an oversized body to read and throw away before hanging up.
+ *
+ * Draining a bounded amount lets the client see the 413 instead of a connection
+ * reset; past that, the sender is not worth the bandwidth.
+ */
+export const DRAIN_LIMIT_BYTES = 1 << 20;
+/**
  * Above this many pending requests Veil stops opening windows by itself: an
  * agent that spams `secret.store` must not be able to carpet the screen.
  */
 export const MAX_AUTO_OPENED_WINDOWS = 3;
 
 const ALLOWED_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+/** The exact shape of a Veil authorization URL, and nothing else. */
+const OPENABLE_URL =
+  /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5}\/r\/[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{1,128}$/;
 
 const STATUS_FOR_CODE: Record<string, number> = {
   [ErrorCode.REQUEST_NOT_FOUND]: 404,
@@ -112,14 +123,22 @@ export class SecureInputUI {
       this.log.event('browser_open_suppressed', { request_id: requestId, component: 'ui' });
       return;
     }
+    // Belt and braces: the URL is generated here, but nothing that reaches a
+    // command line is trusted on the strength of where it came from.
+    if (!OPENABLE_URL.test(url)) {
+      this.log.security('browser_open_refused', { request_id: requestId, component: 'ui' });
+      return;
+    }
     try {
       const opener =
         process.platform === 'darwin'
           ? { command: 'open', args: [url] }
           : process.platform === 'win32'
-            ? { command: 'cmd', args: ['/c', 'start', '', url] }
+            ? // `cmd /c start` would re-parse the argument; explorer.exe takes
+              // it literally.
+              { command: 'explorer.exe', args: [url] }
             : { command: 'xdg-open', args: [url] };
-      // No shell: the URL is a capability token and must not be re-parsed.
+      // No shell anywhere in this path.
       const child = spawn(opener.command, opener.args, { stdio: 'ignore', detached: true });
       child.on('error', () => {
         this.log.event('browser_open_failed', { request_id: requestId, component: 'ui' });
@@ -182,7 +201,12 @@ export class SecureInputUI {
       return;
     }
 
-    const body = await readBody(request);
+    const { body, tooLarge } = await readBody(request);
+    if (tooLarge) {
+      response.setHeader('connection', 'close');
+      this.#errorPage(response, 413, 'The submitted value is too large.');
+      return;
+    }
     try {
       switch (action) {
         case 'submit':
@@ -356,22 +380,48 @@ function splitPath(url: string): string[] {
     .map((segment) => decodeURIComponent(segment));
 }
 
-async function readBody(request: IncomingMessage): Promise<Buffer> {
+interface BodyResult {
+  readonly body: Buffer;
+  readonly tooLarge: boolean;
+}
+
+/**
+ * Read a bounded request body.
+ *
+ * A client can hide the size by using chunked encoding, so the cap is enforced
+ * while reading as well as from `Content-Length`. Overshooting stops the read,
+ * wipes what was buffered and reports the reason: answering "you sent nothing"
+ * to an oversized body would be both wrong and confusing.
+ */
+async function readBody(request: IncomingMessage): Promise<BodyResult> {
   const chunks: Buffer[] = [];
   let total = 0;
+  let tooLarge = false;
+
   for await (const chunk of request) {
     const buffer = chunk as Buffer;
     total += buffer.byteLength;
-    if (total > MAX_BODY_BYTES) {
-      for (const seen of chunks) wipe(seen);
+
+    if (tooLarge || total > MAX_BODY_BYTES) {
+      if (!tooLarge) {
+        tooLarge = true;
+        for (const seen of chunks) wipe(seen);
+        chunks.length = 0;
+      }
       wipe(buffer);
-      return Buffer.alloc(0);
+      if (total > DRAIN_LIMIT_BYTES) {
+        request.destroy();
+        break;
+      }
+      continue;
     }
     chunks.push(buffer);
   }
+
+  if (tooLarge) return { body: Buffer.alloc(0), tooLarge: true };
   const body = Buffer.concat(chunks);
   for (const chunk of chunks) wipe(chunk);
-  return body;
+  return { body, tooLarge: false };
 }
 
 /**
