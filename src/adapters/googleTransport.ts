@@ -40,7 +40,10 @@ export class GoogleStatusError extends Error {
 export async function createDefaultTransport(scopes: readonly string[]): Promise<GoogleTransport> {
   let auth: { getAccessToken(): Promise<string | null | undefined> };
   try {
-    const { GoogleAuth } = (await import('google-auth-library')) as unknown as {
+    // Resolved through a variable so the optional dependency is not required at
+    // build time: an installation that only writes `.env` files never has it.
+    const specifier = 'google-auth-library';
+    const { GoogleAuth } = (await import(specifier)) as {
       GoogleAuth: new (options: { scopes: string[] }) => {
         getAccessToken(): Promise<string | null | undefined>;
       };
