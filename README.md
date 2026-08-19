@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/rosostolato/veil-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rosostolato/veil-mcp/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
 
 **An AI agent can orchestrate the placement of a credential without ever receiving the
 credential value, while a trusted human-controlled interface independently authorizes
@@ -19,34 +19,29 @@ Implemented from [`SPEC.md`](SPEC.md).
 
 ## Install
 
-Veil is a stdio MCP server, so you do not run it yourself — your MCP client starts it. The
-usual Python-MCP pattern applies: `uvx` fetches and runs it in a throwaway environment,
-exactly as `npx -y` does for TypeScript servers. Requires [uv](https://docs.astral.sh/uv/)
-and Python 3.11+.
+Veil is a stdio MCP server, so you do not run it yourself — your MCP client starts it, the
+same way it starts any other npm-published server. Requires Node 20+.
 
 ### Claude Code
 
 ```bash
-claude mcp add veil -e VEIL_ENV_ALLOWED_ROOTS="$PWD" -- \
-  uvx --from git+https://github.com/rosostolato/veil-mcp veil-mcp serve
+cd ~/some/project
+claude mcp add veil -e VEIL_ENV_ALLOWED_ROOTS="$PWD" -- npx -y veil-mcp serve
 ```
 
 Add `-s project` to record it in the repository's `.mcp.json` instead of your own config.
 
 ### Any other client (Claude Desktop, Cursor, Windsurf, VS Code, Zed…)
 
-Drop this into the client's MCP configuration file — the `mcpServers` block is the same
-shape everywhere:
+Drop this into the client's MCP configuration — the `mcpServers` block is the same shape
+everywhere:
 
 ```json
 {
   "mcpServers": {
     "veil": {
-      "command": "uvx",
-      "args": [
-        "--from", "git+https://github.com/rosostolato/veil-mcp",
-        "veil-mcp", "serve"
-      ],
+      "command": "npx",
+      "args": ["-y", "veil-mcp", "serve"],
       "env": {
         "VEIL_ENV_ALLOWED_ROOTS": "/absolute/path/to/your/project"
       }
@@ -55,26 +50,26 @@ shape everywhere:
 }
 ```
 
-Once Veil is on PyPI, the `--from git+…` pair disappears and the invocation becomes
-`uvx veil-mcp serve`. Cloud destinations need their extras — `veil-mcp[gcp]`,
-`veil-mcp[firestore]`, or both — appended to whichever spec you use.
-
-Prefer a permanent install to an ephemeral one:
+Prefer a pinned install to an ephemeral one:
 
 ```bash
-uv tool install "veil-mcp[gcp] @ git+https://github.com/rosostolato/veil-mcp"
-# then use `veil-mcp serve` as the command, with no uvx
+npm install -g veil-mcp
+# then use `veil-mcp serve` as the command, with no npx
 ```
 
 **Set `VEIL_ENV_ALLOWED_ROOTS`.** The `.env` adapter refuses to write outside those
 directories, and it defaults only to the server's working directory. Everything else is
 optional — see [Configuration](#configuration).
 
+Google Secret Manager and Firestore need application default credentials
+(`gcloud auth application-default login`) and the optional `google-auth-library` package,
+which npm installs by default. Veil reports `ADAPTER_UNAVAILABLE` when either is missing.
+
 ### First run
 
 Ask your agent for something like *"store my Stripe test key in .env"*. What happens:
 
-1. The agent calls `secret.store` describing **where** the credential goes. It sends no
+1. The agent calls `secret_store` describing **where** the credential goes. It sends no
    value, because the tool has no field that could carry one.
 2. Veil opens its own window on your machine showing the credential name, destination,
    project, environment, operation and risk. The agent does not receive that link.
@@ -141,6 +136,12 @@ NOT trusted with the credential value:
   Logs, telemetry, crash reports
 ```
 
+Veil's runtime dependency list is one package (`zod`, for input validation) plus an
+optional `google-auth-library` used only when a cloud destination is selected. The MCP
+protocol is implemented in-tree rather than through the official SDK, which would add ~90
+packages — including HTTP servers and an OAuth stack — to a process that holds plaintext
+credentials.
+
 This diagram does not claim the trusted components are invulnerable. It says where the
 credential is *allowed* to exist. Veil is security-sensitive software: if Veil itself is
 malicious or compromised, the boundary is gone. Its source, dependencies and releases
@@ -181,7 +182,7 @@ arguments are screened for credential-shaped values before they are parsed.
 ```
 
 Veil replies with a `request_id`, a risk classification and the normalized destination —
-and opens its own authorization window on your machine. The agent polls `secret.status`.
+and opens its own authorization window on your machine. The agent polls `secret_status`.
 
 **The agent does not get the authorization link.** That link is a capability: anything
 holding it can complete the human's half of the flow, and an agent with a shell or an HTTP
@@ -192,11 +193,11 @@ lets a compromised agent authorize its own request.
 
 | Tool | Purpose |
 | --- | --- |
-| `secret.store` | Create a credential request. Returns non-sensitive metadata and a request id. |
-| `secret.status` | Poll a request. Never returns credential material. |
-| `secret.cancel` | Cancel a pending request; any entered value is destroyed. |
-| `secret.revise` | Invalidate an authorization and start a new one. Nothing is edited in place. |
-| `secret.destinations` | List destinations and the target fields each expects. |
+| `secret_store` | Create a credential request. Returns non-sensitive metadata and a request id. |
+| `secret_status` | Poll a request. Never returns credential material. |
+| `secret_cancel` | Cancel a pending request; any entered value is destroyed. |
+| `secret_revise` | Invalidate an authorization and start a new one. Nothing is edited in place. |
+| `secret_destinations` | List destinations and the target fields each expects. |
 
 ### What the human sees
 
@@ -217,9 +218,9 @@ new one.
 
 | Adapter | Class | Notes |
 | --- | --- | --- |
-| `gcp-secret-manager` | `secret-store` | Preferred. Needs `veil-mcp[gcp]`. `create`, `new-version`, `replace` (disables previous versions). |
+| `gcp-secret-manager` | `secret-store` | Preferred. `create`, `new-version`, `replace` (disables previous versions). |
 | `env-file` | `local-plaintext` | Path-restricted, symlink-refusing, atomic `0600` write. Git-tracked files blocked by default. |
-| `firestore` | `remote-application-storage` | Needs `veil-mcp[firestore]`. Always warns; always requires Stage B. |
+| `firestore` | `remote-application-storage` | Always warns; always requires Stage B. |
 
 `arbitrary-network` destinations (generic HTTP POST, webhooks) are **not implemented**, and
 the adapter registry refuses to register one.
@@ -233,9 +234,11 @@ Stated plainly, because a security tool that oversells itself is worse than none
 - **The broker process sees the secret.** That is the point: something must, or storage is
   impossible. The guarantee is that only the minimal trusted transport and destination
   components do.
-- **CPython cannot reliably erase memory.** `SecretBuffer` wipes the mutable buffer it owns,
-  but percent-decoding, `str`/`bytes` conversions and provider SDKs create immutable copies
-  the interpreter may keep until GC. Veil minimizes and does not fabricate this guarantee.
+- **Memory erasure is best-effort.** `SecretBuffer` wipes the exact `Buffer` it owns, and
+  the HTTP body is percent-decoded into buffers Veil wipes too. But any conversion to a
+  JavaScript string — which writing a `.env` line requires — creates an immutable copy that
+  V8 may keep until garbage collection, and that copy cannot be wiped. Veil minimizes those
+  conversions rather than pretending they do not happen.
 - **The UI is loopback HTTP.** Any process running as your user on your machine can reach
   it, and any such process could also imitate it. Each Veil process prints a random
   identity phrase that its pages display (anti-spoofing aid, not a cryptographic control).
@@ -258,15 +261,13 @@ Stated plainly, because a security tool that oversells itself is worse than none
 
 ```bash
 git clone https://github.com/rosostolato/veil-mcp && cd veil-mcp
-uv venv
-uv pip install -e ".[dev,gcp,firestore]"
-
-# drive it the way a client would
-uv run veil serve
+npm install
+npm run check      # typecheck + lint + format + tests
+npm run build
 ```
 
-To point a client at your checkout, use `/path/to/veil-mcp/.venv/bin/veil-mcp` as the
-command instead of `uvx`.
+To point a client at your checkout, use `node /path/to/veil-mcp/dist/index.js` as the
+command instead of `npx`.
 
 ## Configuration
 
@@ -288,27 +289,28 @@ cannot relax a policy:
 ## Tests
 
 ```bash
-uv run pytest                  # everything
-uv run pytest tests/security   # the adversarial suite only
-uv run ruff check .
-uv run mypy
+npm test                # everything
+npm run test:security   # the adversarial suite only
+npm run check           # what CI runs
 ```
 
 The security suite is a product requirement, not a nicety. It contains canary-leakage
 detection across every observable channel, malicious-agent tests, prompt-injection
 fixtures, TOCTOU and replay tests, 100-way concurrency stress, race conditions, crash
-paths, provider-failure simulation, UI checks and fuzzing. A release is blocked if any
-canary leaks, any authorization bypass succeeds, any post-approval mutation succeeds, any
-completed request is replayable, any secret crosses a request boundary, any raw provider
-error reaches MCP, or any high-risk operation skips confirmation.
+paths (including a real `SIGKILL` mid-write), provider-failure simulation, UI checks and
+fuzzing. A release is blocked if any canary leaks, any authorization bypass succeeds, any
+post-approval mutation succeeds, any completed request is replayable, any secret crosses a
+request boundary, any raw provider error reaches MCP, or any high-risk operation skips
+confirmation.
 
 See [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) for the invariant-to-test map.
-
 
 ## Project status
 
 Version 0.1.0, built to [`SPEC.md`](SPEC.md), which stays in the repository as the
-authoritative description of the intended behaviour. Every substantial module and test
+authoritative description of the intended behaviour. The implementation is TypeScript on
+Node; it was ported from an equivalent Python implementation, which remains in the git
+history. Every substantial module and test
 cites the section it implements, so a reviewer can check the code against the requirement
 rather than against a summary of it.
 
@@ -326,8 +328,7 @@ Security is the product here, so the bar for changes is specific rather than bur
   flaw, the architecture is what changes.
 - New runtime dependencies in the core are opposed by default. The broker is the trusted
   computing base for credential material; provider SDKs belong behind an optional extra.
-- Run `ruff check .`, `ruff format --check .`, `mypy` and `pytest` before opening a pull
-  request.
+- Run `npm run check` before opening a pull request.
 
 Found a vulnerability? Please report it privately through GitHub's security advisories
 rather than opening a public issue.

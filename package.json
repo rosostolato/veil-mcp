@@ -1,0 +1,64 @@
+{
+  "name": "veil-mcp",
+  "version": "0.1.0",
+  "description": "An MCP server and secure input broker: an AI agent can place a credential without ever receiving it, while a trusted human-controlled UI authorizes where it goes.",
+  "license": "Apache-2.0",
+  "author": "Eduardo Rosostolato",
+  "type": "module",
+  "bin": {
+    "veil-mcp": "dist/index.js",
+    "veil": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SPEC.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rosostolato/veil-mcp.git"
+  },
+  "homepage": "https://github.com/rosostolato/veil-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/rosostolato/veil-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "secrets",
+    "security",
+    "credentials",
+    "ai-agents"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "test:security": "vitest run test/security",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm test"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "google-auth-library": "^11.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0",
+    "vitest": "^4.1.11"
+  }
+}

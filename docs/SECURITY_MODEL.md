@@ -16,9 +16,9 @@ Everything below serves one of those two.
 
 ```text
 browser (POST body, loopback)
-  └─▶ Handler._read_body / _form_value      bytearray, wiped after use
-        └─▶ SecretBuffer                    owned by exactly one SecretRequest
-              └─▶ adapter.store(...)        provider SDK / atomic file write
+  └─▶ readBody / formValue          Buffers, wiped after use
+        └─▶ SecretBuffer            owned by exactly one SecretRequest
+              └─▶ adapter.store()   HTTPS request body / atomic file write
                     └─▶ destination
 ```
 
@@ -29,13 +29,13 @@ shell string, a global, a cache, or anything serialized.
 
 | Layer | Code | What it catches |
 | --- | --- | --- |
-| No secret-shaped schema fields | `mcp_server/tools.py` | An agent trying to *send* a credential |
-| Argument screen (names + value shapes) | `ToolRouter._screen_arguments` | Covert transport in unmodelled fields |
-| Field allowlist for logs | `logging_.ALLOWED_AUDIT_FIELDS` | A careless call site logging the wrong thing |
-| Credential-shape screen for log values | `redaction.looks_like_credential` | Recognisable credential text in an allowed field |
-| Live-secret tripwire | `SecretBroker.contains_live_secret` | *Any* live secret in a log line, MCP frame or HTML page, in any encoding |
-| Result and error scrubbing | `SecretBroker._scrub_result`, `_sanitize` | An adapter echoing the credential back |
-| stdout reservation | `veil.__main__._serve` | A stray `print` contaminating the protocol stream |
+| No secret-shaped schema fields | `src/mcp/tools.ts` | An agent trying to *send* a credential |
+| Argument screen (names + value shapes) | `ToolRouter.#screenArguments` | Covert transport in unmodelled fields |
+| Field allowlist for logs | `logging.ALLOWED_AUDIT_FIELDS` | A careless call site logging the wrong thing |
+| Credential-shape screen for log values | `redaction.looksLikeCredential` | Recognisable credential text in an allowed field |
+| Live-secret tripwire | `SecretBroker.containsLiveSecret` | *Any* live secret in a log line, MCP frame or HTML page, in any encoding |
+| Result and error scrubbing | `SecretBroker.#scrubResult`, `#sanitize` | An adapter echoing the credential back |
+| stdout reservation | `src/index.ts` (`reserveStdout`) | A stray `console.log` or `process.stdout.write` contaminating the protocol stream |
 
 ## Traceability
 
@@ -43,64 +43,76 @@ shell string, a global, a cache, or anything serialized.
 
 | Requirement | Implementation | Test |
 | --- | --- | --- |
-| SEC-001 no secret-value parameter | `tools.ToolRouter.list_tools`, closed schemas | `leakage/…::test_secret_never_enters_mcp_arguments` |
-| SEC-002 no secret in MCP traffic | `MCPServer._write` tripwire | `leakage/…::test_secret_never_appears_in_any_observable_channel`, `test_mcp_protocol.py::test_outbound_frames_carrying_a_live_secret_are_blocked` |
-| SEC-003 no secret in model-visible results | `StoreResult.as_public_dict`, `_scrub_result` | `provider_errors/…::test_provider_error_is_sanitized[LeakyResultAdapter]` |
-| SEC-004/005 no secret in stdout/stderr | fd reservation, structured logging | `leakage/…`, `test_mcp_protocol.py::test_server_process_keeps_stdout_for_protocol_only` |
-| SEC-006 no secret in logs, any level | `logging_.AuditLogger` | `leakage/…::test_secret_is_absent_from_logs_at_every_level`, `…::test_live_secret_in_a_log_record_is_suppressed_by_the_tripwire` |
-| SEC-007 no secret in URLs | POST body only; PRG redirect | `ui/…::test_url_never_contains_credential_material_and_post_redirects` |
-| SEC-008/009 no secret in argv or shell | `env_file._git_output` (paths only, `shell=False`), provider SDKs | `test_env_adapter.py::test_no_credential_ever_reaches_a_subprocess_argv`, `conftest.argv_recorder` |
-| SEC-010 no temporary copies | `env_file._atomic_write` (0600, deterministic unlink) | `leakage/…::test_secret_reaches_only_the_approved_env_file`, `test_env_adapter.py::test_interrupted_write_leaves_the_original_intact` |
-| §23 derived-canary search | `redaction.derivations` (shared by product and harness) | `leakage/…::test_canary_derivations_cover_required_encodings` |
+| SEC-001 no secret-value parameter | `ToolRouter.listTools`, closed schemas | `leakage` › *SEC-001: no tool schema permits credential content* |
+| SEC-002 no secret in MCP traffic | `MCPServer.#write` tripwire | `leakage` › *SEC-002…SEC-008*, `mcpProtocol` › *blocks an outbound frame carrying a live secret* |
+| SEC-003 no secret in model-visible results | `storeResultToPublic`, `#scrubResult` | `provider-errors` › *sanitizes an adapter that returns the secret in its result* |
+| SEC-004/005 no secret in stdout/stderr | fd reservation, structured logging | `mcpProtocol` › *SEC-004: reserves stdout for the protocol alone* |
+| SEC-006 no secret in logs, any level | `logging.AuditLogger` | `leakage` › *SEC-006* (both cases) |
+| SEC-007 no secret in URLs | POST body only; PRG redirect | `ui` › *keeps the credential out of the URL and redirects after POST* |
+| SEC-008/009 no secret in argv or shell | `envFile` git helper (paths only, no shell) and REST calls | `envAdapter` › *keeps the credential out of every spawned argv* |
+| SEC-010 no temporary copies | `envFile.atomicWrite` (0600, deterministic unlink) | `leakage` › *SEC-010*, `envAdapter` › *interrupted write* |
+| §23 derived-canary search | `redaction.derivations` (shared by product and harness) | `leakage` › *derivations cover the required encodings* |
 
 ### Authorization (SPEC.md §7–§12, §25)
 
 | Requirement | Implementation | Test |
 | --- | --- | --- |
-| AUTH-001 display ≡ execution | one `AuthorizationSnapshot`; UI renders it, executor consumes it | `authorization/…::test_displayed_destination_is_the_executed_destination` (asserts object *identity*) |
-| AUTH-002 destination mutation | frozen dataclasses + digest re-check + `revise` | `…::test_destination_mutation_invalidates_authorization`, `…::test_snapshot_is_frozen_and_tampering_aborts_execution` |
-| AUTH-003 operation mutation | same | `…::test_operation_mutation_requires_new_confirmation` |
-| AUTH-004 secret-name mutation | same | `…::test_secret_name_mutation_after_authorization_fails` |
-| AUTH-005 adapter mutation | executor re-resolves the adapter by identity | `…::test_adapter_mutation_after_authorization_fails` |
-| AUTH-006 high-risk double confirmation | `policy.evaluate_risk`, `_execute` precondition | `…::test_high_risk_operation_cannot_skip_stage_b` |
-| AUTH-007/008 cancellation | `SecretBroker.cancel` → zeroize | `…::test_cancellation_at_stage_a_accepts_no_secret`, `…::test_cancellation_at_stage_b_discards_the_secret` |
-| §10 agents cannot downgrade risk | monotonic escalation only | `…::test_agent_cannot_downgrade_risk_by_claiming_development` |
-| §4.2 authorization is out of band | link goes to the browser, not to MCP | `authorization/test_out_of_band_authorization.py` |
+| AUTH-001 display ≡ execution | one deep-frozen `AuthorizationSnapshot`; UI renders it, executor consumes it | `authorization` › *AUTH-001* (asserts object *identity*) |
+| AUTH-002 destination mutation | `deepFreeze` + digest re-check + `revise` | `authorization` › *AUTH-002* (both cases) |
+| AUTH-003 operation mutation | same | `authorization` › *AUTH-003* |
+| AUTH-004 secret-name mutation | same | `authorization` › *AUTH-004* |
+| AUTH-005 adapter mutation | executor re-resolves the adapter by identity | `authorization` › *AUTH-005* |
+| AUTH-006 high-risk double confirmation | `policy.evaluateRisk`, `#execute` precondition | `authorization` › *AUTH-006* |
+| AUTH-007/008 cancellation | `SecretBroker.cancel` → zeroize | `authorization` › *AUTH-007*, *AUTH-008* |
+| §10 agents cannot downgrade risk | monotonic escalation only | `authorization` › *§10 an agent cannot downgrade risk* |
+| §4.2 authorization is out of band | link goes to the browser, not to MCP | `test/security/authorization/out-of-band.test.ts` |
 
 ### State machine, replay, concurrency (SPEC.md §14, §18.5–§18.7, §28–§31)
 
 | Requirement | Implementation | Test |
 | --- | --- | --- |
-| Exact state graph | `model.ALLOWED_TRANSITIONS` | `test_core_types.py::test_state_machine_matches_the_specified_graph` |
-| Terminal ⇒ non-reusable | `_finish`, `_require_state` | `replay/test_replay.py` (completed, cancelled, expired) |
-| Unpredictable single-use ids | `ids.new_request_id`, `new_token` | `replay/…::test_request_ids_are_unpredictable` |
-| Single-flight execution | `_claim_execution_locked` | `concurrency/test_races.py::test_double_submit_writes_exactly_once` |
-| No cross-request secrets | secret owned by its request; no global table | `concurrency/test_concurrency.py` (100 canaries) |
-| Deterministic races | one `RLock`, expiry checked on entry | `concurrency/test_races.py` |
-| Crash safety | `install_crash_handler`, `shutdown` | `crash/test_crash_paths.py` (4 kill points, one via `SIGKILL`) |
+| Exact state graph | `model.ALLOWED_TRANSITIONS` | `coreTypes` › *matches the specified state graph* |
+| Terminal ⇒ non-reusable | `#finish`, `#requireState` | `test/security/replay/replay.test.ts` (completed, cancelled, expired) |
+| Unpredictable single-use ids | `ids.newRequestId`, `newToken` | `replay` › *request ids are unpredictable and unique* |
+| Single-flight execution | `#claimExecution` | `races` › *a double submit writes exactly once* |
+| No cross-request secrets | secret owned by its request; no global table | `test/security/concurrency/concurrency.test.ts` (100 canaries) |
+| Deterministic races | no locks (single-threaded event loop); every check-then-act runs without an intervening `await` | `test/security/concurrency/races.test.ts` |
+| Crash safety | `installCrashHandler`, `shutdown` | `test/security/crash/crash.test.ts` (4 kill points, one a real `SIGKILL`) |
 
 ### Errors, adapters, UI (SPEC.md §16, §20, §32–§34, §36)
 
 | Requirement | Implementation | Test |
 | --- | --- | --- |
-| No raw provider errors | `adapter.sanitize_error` + broker fallback | `provider_errors/test_provider_errors.py` |
-| Sanitizer failure suppresses | `_sanitize` catches everything | `…[RaisingSanitizerAdapter]` |
-| Status-code mapping only | `GcpSecretManagerAdapter.sanitize_error` | `…::test_provider_status_codes_map_to_public_errors` |
-| `arbitrary-network` disabled | `AdapterRegistry.register` refuses it | `malicious_agent/…::test_arbitrary_network_destination_cannot_be_registered` |
-| `.env` symlink/traversal/git rules | `env_file` | `test_env_adapter.py` |
-| UI headers, masking, PRG, expiry | `ui/render.security_headers`, `ui/server` | `ui/test_ui_security.py` |
-| Hostile metadata rendering | `redaction.safe_display` + HTML escaping | `fuzz/test_fuzz_metadata.py` |
+| No raw provider errors | `adapter.sanitizeError` + broker fallback | `test/security/provider-errors/provider-errors.test.ts` |
+| Sanitizer failure suppresses | `#sanitize` catches everything | `provider-errors` › *throws inside its sanitizer* |
+| Status-code mapping only | `GcpSecretManagerAdapter.sanitizeError` | `provider-errors` › *maps provider status N* |
+| `arbitrary-network` disabled | `AdapterRegistry.register` refuses it | `malicious-agent` › *§16 cannot even be registered* |
+| `.env` symlink/traversal/git rules | `src/adapters/envFile.ts` | `test/envAdapter.test.ts` |
+| UI headers, masking, PRG, expiry | `ui/render.securityHeaders`, `ui/server` | `test/security/ui/ui.test.ts` |
+| Hostile metadata rendering | `redaction.safeDisplay` + HTML escaping | `test/security/fuzz/fuzz.test.ts` |
 
 ## Release-blocking rules (SPEC.md §38)
 
-CI runs `pytest tests/security` on every push and pull request. There is no warning-only
+CI runs `npm run test:security` on every push and pull request. There is no warning-only
 mode: a canary leak, an authorization bypass, a post-approval mutation, a replay, a
 cross-request secret, a raw provider error or a skipped high-risk confirmation fails the
 build.
 
+## Implementation notes worth knowing
+
+- **Why not the official MCP SDK?** It pulls ~90 packages, including Express, Hono, Jose
+  and an OAuth stack, none of which a stdio server uses. The protocol is implemented in
+  `src/mcp/server.ts` instead, and `test/mcpProtocol.test.ts` pins the wire behaviour.
+- **Why not elicitation?** The spec-native way to collect input mid-tool returns the value
+  through the MCP protocol and into the model's context — precisely the disclosure Veil
+  exists to prevent. The out-of-band browser window is the point, not a workaround.
+- **Tool names use underscores** (`secret_store`, not `secret.store` as SPEC.md §13 writes
+  it) because several MCP clients constrain tool names to `[a-zA-Z0-9_-]`. The contract is
+  otherwise the one the spec describes.
+
 ## Known limitations
 
 See the README's "Security assumptions and limitations". The short version: the broker
-process sees the credential, CPython cannot guarantee memory erasure, the loopback UI is
+process sees the credential, V8 cannot guarantee memory erasure, the loopback UI is
 reachable by any process running as you, and Veil does not judge whether the destination
 you approved was a good idea.
