@@ -284,11 +284,43 @@ export class FakeFirestore {
           document ? { status: 200, body: { fields: document } } : { status: 404, body: null },
         );
       }
-      const incoming = (request.body as { fields: Record<string, { stringValue: string }> }).fields;
-      const current = this.documents.get(path) ?? {};
-      this.documents.set(path, { ...current, ...incoming });
+      // Real PATCH semantics: only the path named in updateMask changes, so a
+      // dotted mask sets one leaf inside a map and keeps its siblings.
+      const mask = decodeURIComponent(
+        new URL(request.url, 'https://fake.invalid').searchParams.get('updateMask.fieldPaths') ?? '',
+      );
+      const segments = mask.split('.');
+      const incoming = (request.body as { fields: Record<string, unknown> }).fields;
+      const document = structuredClone(this.documents.get(path) ?? {});
+      let source: Record<string, unknown> = incoming;
+      let target: Record<string, unknown> = document;
+      for (const [index, segment] of segments.entries()) {
+        const value = source[segment] as { mapValue?: { fields?: Record<string, unknown> } };
+        if (index === segments.length - 1) {
+          target[segment] = value;
+          break;
+        }
+        const existing = target[segment] as { mapValue?: { fields?: Record<string, unknown> } };
+        const fields = existing?.mapValue?.fields ?? {};
+        target[segment] = { mapValue: { fields } };
+        target = fields;
+        source = value.mapValue?.fields ?? {};
+      }
+      this.documents.set(path, document);
       return Promise.resolve({ status: 200, body: { name: path } });
     };
+  }
+
+  /** The plain string at a dotted field path, or undefined. */
+  valueAt(path: string, fieldPath: string): string | undefined {
+    let node: unknown = { mapValue: { fields: this.documents.get(path) ?? {} } };
+    for (const segment of fieldPath.split('.')) {
+      node = (node as { mapValue?: { fields?: Record<string, unknown> } }).mapValue?.fields?.[
+        segment
+      ];
+      if (node === undefined) return undefined;
+    }
+    return (node as { stringValue?: string }).stringValue;
   }
 
   /** The stored plain values, for assertions. */

@@ -32,8 +32,54 @@ import {
 
 const PROJECT_PATTERN = /^(?:[a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]{6,20})$/;
 const PATH_SEGMENT_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
-const FIELD_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+/**
+ * One segment of a field path. A dotted `field` (`openrouter.api_key`) names a
+ * key inside a map field, which is how application config documents are
+ * usually shaped. Segments stay simple identifiers: Firestore's backtick-quoted
+ * segments are not accepted, so a path can never smuggle a dot or a quote.
+ */
+const FIELD_SEGMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const MAX_FIELD_DEPTH = 8;
 const SCOPES = ['https://www.googleapis.com/auth/datastore'];
+
+type FirestoreFields = Record<string, unknown>;
+
+/** `a.b.c` → `['a', 'b', 'c']`, or `null` when any segment is not a plain identifier. */
+function fieldSegments(path: string): string[] | null {
+  const segments = path.split('.');
+  if (segments.length > MAX_FIELD_DEPTH) return null;
+  return segments.every((segment) => FIELD_SEGMENT_PATTERN.test(segment)) ? segments : null;
+}
+
+/** The REST `fields` body that sets `segments` to a string, nested through map values. */
+function nestedFields(segments: readonly string[], value: string): FirestoreFields {
+  let node: unknown = { stringValue: value };
+  for (const segment of [...segments].reverse().slice(0, -1)) {
+    node = { mapValue: { fields: { [segment]: node } } };
+  }
+  return { [segments[0] ?? '']: node };
+}
+
+/**
+ * What the document holds at `segments`: `absent`, `present`, or `blocked` when
+ * an intermediate segment exists but is not a map. Writing through a blocked
+ * path would replace that value with a map, which is a silent overwrite.
+ */
+function fieldState(
+  fields: FirestoreFields | undefined,
+  segments: readonly string[],
+): 'absent' | 'present' | 'blocked' {
+  let current: FirestoreFields | undefined = fields;
+  for (const [index, segment] of segments.entries()) {
+    if (!current || !Object.hasOwn(current, segment)) return 'absent';
+    if (index === segments.length - 1) return 'present';
+    const map = (current[segment] as { mapValue?: { fields?: FirestoreFields } } | undefined)
+      ?.mapValue;
+    if (!map) return 'blocked';
+    current = map.fields ?? {};
+  }
+  return 'absent';
+}
 
 export class FirestoreAdapter extends SecretDestinationAdapter {
   readonly id = 'firestore';
@@ -60,7 +106,9 @@ export class FirestoreAdapter extends SecretDestinationAdapter {
         field: {
           type: 'string',
           maxLength: 128,
-          description: 'Document field to set. Defaults to the credential name.',
+          description:
+            'Document field to set. Defaults to the credential name. A dotted path ' +
+            '(e.g. "openrouter.api_key") sets a key inside a map field, leaving its siblings untouched.',
         },
       },
     };
@@ -100,7 +148,7 @@ export class FirestoreAdapter extends SecretDestinationAdapter {
         );
       }
     }
-    if (!FIELD_PATTERN.test(field)) {
+    if (!fieldSegments(field)) {
       throw adapterError(ErrorCode.INVALID_TARGET, 'The document field name is not valid.');
     }
 
@@ -158,11 +206,11 @@ export class FirestoreAdapter extends SecretDestinationAdapter {
     }).catch(() => null);
 
     if (!response || response.status !== 200) return { ok: true, exists: false };
-    const fields = (response.body as { fields?: Record<string, unknown> } | null)?.fields ?? {};
-    const fieldName = target.fields.field ?? '';
+    const fields = (response.body as { fields?: FirestoreFields } | null)?.fields ?? {};
+    const segments = fieldSegments(target.fields.field ?? '') ?? [];
     return {
       ok: true,
-      exists: Object.hasOwn(fields, fieldName),
+      exists: fieldState(fields, segments) !== 'absent',
       notes: ['The document already exists.'],
     };
   }
@@ -182,27 +230,43 @@ export class FirestoreAdapter extends SecretDestinationAdapter {
   ): Promise<StoreResult> {
     const transport = await this.#getTransport();
     const fieldName = target.fields.field ?? '';
-
-    if (operation === WriteMode.CREATE) {
-      const existing = await transport({
-        method: 'GET',
-        url: this.#documentUrl(target),
-        timeoutMs: this.#timeoutMs,
-      }).catch(() => null);
-      const fields =
-        (existing?.body as { fields?: Record<string, unknown> } | null)?.fields ?? undefined;
-      if (existing?.status === 200 && fields && Object.hasOwn(fields, fieldName)) {
-        throw adapterError(
-          ErrorCode.DESTINATION_CONFLICT,
-          'The document field already exists; a replace operation is required.',
-        );
-      }
+    const segments = fieldSegments(fieldName);
+    if (!segments) {
+      throw adapterError(ErrorCode.INVALID_TARGET, 'The document field name is not valid.');
     }
 
+    // Read before every write, not only on create: a path through a non-map
+    // value would turn that value into a map, and replace mode must not do that
+    // to a field it was not asked to replace.
+    const existing = await transport({
+      method: 'GET',
+      url: this.#documentUrl(target),
+      timeoutMs: this.#timeoutMs,
+    }).catch(() => null);
+    const fields =
+      existing?.status === 200
+        ? ((existing.body as { fields?: FirestoreFields } | null)?.fields ?? {})
+        : undefined;
+    const state = fieldState(fields, segments);
+    if (state === 'blocked') {
+      throw adapterError(
+        ErrorCode.DESTINATION_CONFLICT,
+        'A parent of the document field holds a value that is not a map.',
+      );
+    }
+    if (operation === WriteMode.CREATE && state === 'present') {
+      throw adapterError(
+        ErrorCode.DESTINATION_CONFLICT,
+        'The document field already exists; a replace operation is required.',
+      );
+    }
+
+    // The update mask names the full dotted path, so Firestore sets only that
+    // leaf and keeps every sibling inside the parent maps.
     const response = await transport({
       method: 'PATCH',
       url: `${this.#documentUrl(target)}?updateMask.fieldPaths=${encodeURIComponent(fieldName)}`,
-      body: { fields: { [fieldName]: { stringValue: secret.toText() } } },
+      body: { fields: nestedFields(segments, secret.toText()) },
       timeoutMs: this.#timeoutMs,
     });
     if (response.status < 200 || response.status >= 300) {

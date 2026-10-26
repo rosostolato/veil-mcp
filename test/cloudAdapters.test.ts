@@ -168,4 +168,74 @@ describe('Firestore adapter', () => {
     expect((status.error as { code: string }).code).toBe('DESTINATION_CONFLICT');
     expect(provider.values('config/runtime')).toEqual({ API_TOKEN: 'existing' });
   });
+
+  const withField = (field: string, overrides: Record<string, unknown> = {}) =>
+    firestoreArgs({
+      target: { project: 'acme-dev-project', collection: 'config', document: 'runtime', field },
+      ...overrides,
+    });
+
+  it('writes a dotted field into a map and keeps its siblings', async () => {
+    // The shape application config documents usually have: one map per service.
+    provider.documents.set('config/runtime', {
+      openrouter: { mapValue: { fields: { base_url: { stringValue: 'https://x' } } } },
+      stripe: { stringValue: 'untouched' },
+    });
+
+    const payload = await harness.callTool('secret_store', withField('openrouter.api_key'));
+    expect((payload.destination as { resource: string }).resource).toBe(
+      'config/runtime.openrouter.api_key',
+    );
+    const status = await harness.finishFlow(payload, canary.value);
+
+    expect(status.state).toBe('STORED');
+    expect(provider.valueAt('config/runtime', 'openrouter.api_key')).toBe(canary.value);
+    expect(provider.valueAt('config/runtime', 'openrouter.base_url')).toBe('https://x');
+    expect(provider.valueAt('config/runtime', 'stripe')).toBe('untouched');
+    const patch = provider.requests.find((request) => request.method === 'PATCH');
+    expect(patch?.url).toContain('updateMask.fieldPaths=openrouter.api_key');
+  });
+
+  it('creates the parent maps when they do not exist yet', async () => {
+    const payload = await harness.callTool('secret_store', withField('svc.nested.key'));
+    const status = await harness.finishFlow(payload, canary.value);
+
+    expect(status.state).toBe('STORED');
+    expect(provider.valueAt('config/runtime', 'svc.nested.key')).toBe(canary.value);
+  });
+
+  it('refuses a dotted field that already exists in create mode', async () => {
+    provider.documents.set('config/runtime', {
+      openrouter: { mapValue: { fields: { api_key: { stringValue: 'existing' } } } },
+    });
+
+    const payload = await harness.callTool('secret_store', withField('openrouter.api_key'));
+    const status = await harness.finishFlow(payload, canary.value);
+
+    expect(status.state).toBe('FAILED');
+    expect((status.error as { code: string }).code).toBe('DESTINATION_CONFLICT');
+    expect(provider.valueAt('config/runtime', 'openrouter.api_key')).toBe('existing');
+  });
+
+  it('refuses to write through a parent that is not a map, even in replace mode', async () => {
+    provider.documents.set('config/runtime', { openrouter: { stringValue: 'a plain value' } });
+
+    const payload = await harness.callTool(
+      'secret_store',
+      withField('openrouter.api_key', { write_mode: 'replace' }),
+    );
+    const status = await harness.finishFlow(payload, canary.value);
+
+    expect(status.state).toBe('FAILED');
+    expect((status.error as { code: string }).code).toBe('DESTINATION_CONFLICT');
+    expect(provider.valueAt('config/runtime', 'openrouter')).toBe('a plain value');
+  });
+
+  it.each(['.api_key', 'openrouter.', 'a..b', 'a.b-c', 'a.`b`', 'a.b.c.d.e.f.g.h.i'])(
+    'rejects the malformed field path %s',
+    async (field) => {
+      const payload = await harness.callTool('secret_store', withField(field));
+      expect(payload.code).toBe('INVALID_TARGET');
+    },
+  );
 });
