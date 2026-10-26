@@ -1,19 +1,33 @@
 # Veil
 
+**Let your AI agent set up API keys without ever seeing them.**
+
 [![CI](https://github.com/rosostolato/veil-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rosostolato/veil-mcp/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
 
-**An AI agent can orchestrate the placement of a credential without ever receiving the
-credential value, while a trusted human-controlled interface independently authorizes
-where that credential is allowed to go.**
+You ask Claude, Cursor or any MCP client to *"put the Stripe key in Secret Manager"*. The
+agent works out **where** it goes. You paste the value into Veil's own window. The key goes
+straight to the destination and never enters the chat, the prompt or the logs.
 
-That sentence is the entire promise. Veil is an MCP server plus a secure input broker:
-the agent says *"put a Stripe production key in Google Secret Manager"*, the human sees
-exactly which project and secret will be written and types the value into Veil's own
-window, and the value goes straight to the destination. The model never holds it.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/paste-dark.png">
+    <img src="docs/images/paste-light.png" width="420" alt="Veil's window: a red PRODUCTION band, 'Paste STRIPE_SECRET_KEY', the destination Google Secret Manager › acme-prod › stripe-secret-key, a masked field and a Continue button">
+  </picture>
+</p>
 
-Implemented from [`SPEC.md`](SPEC.md).
+1. **The agent asks.** It calls `secret_store` with the destination. The tool has no field
+   that could carry a value.
+2. **You paste.** Veil opens a local window that shows where the key goes and checks its
+   format.
+3. **Veil writes it.** The agent only learns `STORED` and a reference. It never sees the key.
+
+```bash
+claude mcp add veil -e VEIL_ENV_ALLOWED_ROOTS="$PWD" -- npx -y veil-mcp serve
+```
+
+Then ask your agent: *"store my Stripe test key in .env"*.
 
 ---
 
@@ -67,18 +81,44 @@ which npm installs by default. Veil reports `ADAPTER_UNAVAILABLE` when either is
 
 ### First run
 
-Ask your agent for something like *"store my Stripe test key in .env"*. What happens:
+Ask your agent for something like *"store my Stripe test key in .env"*. Veil opens its
+window on your machine; the agent does not receive that link. The band at the top tells you
+the environment at a glance, and the field tells you whether the key looks right before you
+send it.
 
-1. The agent calls `secret_store` describing **where** the credential goes. It sends no
-   value, because the tool has no field that could carry one.
-2. Veil opens its own window on your machine showing the credential name, destination,
-   project, environment, operation and risk. The agent does not receive that link.
-3. You type the value into a masked field. Medium- and high-risk operations ask for a
-   second confirmation, after entry and before the write.
-4. Veil writes it and tells the agent `STORED` plus a destination reference — never the
-   value.
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/warning-dark.png">
+        <img src="docs/images/warning-light.png" alt="A test key pasted for a production destination: 'Looks like a test key, but this goes to production.'">
+      </picture>
+      <p><strong>Catches the wrong key.</strong> A <code>test</code> key headed for
+      production gets flagged in the window. The check runs locally and never shows the
+      value.</p>
+    </td>
+    <td width="33%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/confirm-dark.png">
+        <img src="docs/images/confirm-light.png" alt="Second step: 'Save to production?' with a field where acme-prod has been typed">
+      </picture>
+      <p><strong>Confirms risky writes.</strong> For production or overwrites, nothing is
+      written until you type the project name.</p>
+    </td>
+    <td width="33%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/saved-dark.png">
+        <img src="docs/images/saved-light.png" alt="'Saved' with the destination and the reference projects/acme-prod/secrets/stripe-secret-key/versions/4">
+      </picture>
+      <p><strong>Tells the agent only "stored".</strong> Veil wipes the value and hands back
+      a reference such as the new version.</p>
+    </td>
+  </tr>
+</table>
 
-Veil's own stderr carries structured audit JSON. Nothing else is expected of you in the
+<kbd>Enter</kbd> continues and <kbd>Esc</kbd> cancels. The link works once: if anything
+opened it before your browser did, Veil shows an alarm and a Cancel button instead of the
+request. Veil's stderr carries structured audit JSON; nothing else is expected of you in the
 terminal.
 
 ---
@@ -186,10 +226,24 @@ and opens its own authorization window on your machine. The agent polls `secret_
 
 **The agent does not get the authorization link.** That link is a capability: anything
 holding it can complete the human's half of the flow, and an agent with a shell or an HTTP
-tool is precisely the threat model. Veil hands it to your browser and prints it to its own
-console instead. Set `VEIL_DISCLOSE_AUTHORIZATION_URL=true` if your setup needs the agent
-to relay the link (for example, a remote or headless session) — and understand that this
-lets a compromised agent authorize its own request.
+tool is precisely the threat model. Veil hands it straight to your browser. Set
+`VEIL_DISCLOSE_AUTHORIZATION_URL=true` if your setup needs the agent to relay the link (for
+example, a remote or headless session) — and understand that this lets a compromised agent
+authorize its own request.
+
+**The link works once.** Opening it trades it for an `HttpOnly; SameSite=Lax` session cookie
+scoped to that request and redirects to an address with no token in it; every later page and
+form needs the cookie. A second opening of the same link gets an alarm page ("This link was
+already opened") with a Cancel button, never the request. So a copy left in browser history,
+a process list or a log is dead once you open it, and one used by someone else first is
+visible to you.
+
+**Logs never hold the identity phrase, and hold the link only as a last resort.** MCP hosts
+save server stderr to files any process running as you can read (Claude Desktop under
+`~/Library/Logs/Claude/`, Claude Code under its cache directory), so the audit record carries
+a short fingerprint of the link instead. The full link is logged only when no browser could
+be opened (`VEIL_OPEN_BROWSER=false`, too many windows, or the opener failed), because the
+operator then has no other way in.
 
 | Tool | Purpose |
 | --- | --- |
@@ -201,11 +255,25 @@ lets a compromised agent authorize its own request.
 
 ### What the human sees
 
-Stage A shows the credential name, destination provider, project/account, resource,
-operation and risk **before** the value is entered. High-risk operations (production
-overwrite, plaintext storage, application databases, replacing a credential) require a
-second confirmation in Stage B, after entry and before the write. The value is never
-displayed back.
+Stage A shows the credential name, the destination path and the environment and risk
+**before** the value is entered; operation, warnings and the agent's description sit under
+"Details". High-risk operations (production overwrite, plaintext storage, application
+databases, replacing a credential) require a second confirmation in Stage B, after entry and
+before the write: the human types the project name (for a local file, `path:KEY`, such as
+`.env:API_TOKEN`), and the server checks it. This is an attention check, not
+authentication: the expected text is on the page, and it is whatever the agent chose. What
+keeps a second party out of Stage B is the session cookie. The value is never displayed back.
+
+POSTs are refused unless they come from Veil's own page (`Origin` and `Sec-Fetch-Site`), and
+every response sets `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy` to
+`same-origin`. The credential field asks browser and third-party password managers not to
+save it.
+
+The page runs one inline script under a per-response CSP nonce. It describes the value's
+shape (length, a `live`/`test` marker against the destination's environment, stray
+whitespace), counts down the expiry and maps <kbd>Esc</kbd> to Cancel. The CSP gives it no
+network access, and Cancel is a separate form, so cancelling never sends the value. Without
+JavaScript the page still works, minus those three aids.
 
 The page the human reads and the operation the executor performs are the *same immutable
 object* — there is no separate "display destination". Any change to destination, project,
@@ -219,7 +287,7 @@ new one.
 | Adapter | Class | Notes |
 | --- | --- | --- |
 | `gcp-secret-manager` | `secret-store` | Preferred. `create`, `new-version`, `replace` (disables previous versions). |
-| `env-file` | `local-plaintext` | Path-restricted, symlink-refusing, atomic `0600` write. Git-tracked files blocked by default. |
+| `env-file` | `local-plaintext` | Only `.env` / `.env.<suffix>` names, inside allowed roots. Symlink-refusing, atomic `0600` write. Git-tracked files blocked, and a new file must be git-ignored. |
 | `firestore` | `remote-application-storage` | Always warns; always requires Stage B. |
 
 `arbitrary-network` destinations (generic HTTP POST, webhooks) are **not implemented**, and
@@ -240,10 +308,16 @@ Stated plainly, because a security tool that oversells itself is worse than none
   V8 may keep until garbage collection, and that copy cannot be wiped. Veil minimizes those
   conversions rather than pretending they do not happen.
 - **The UI is loopback HTTP.** Any process running as your user on your machine can reach
-  it, and any such process could also imitate it. Each Veil process prints a random
-  identity phrase that its pages display (anti-spoofing aid, not a cryptographic control).
-  Withholding the link from the agent raises the bar; it does not stop a process that can
-  read Veil's console output, list the browser's argv, or scan loopback ports.
+  it, and any such process could also imitate it. Veil refuses to bind anywhere but
+  loopback. Request pages show a per-process identity phrase, but it is no longer logged,
+  so today there is no second channel to compare it against: treat it as decoration, not
+  as anti-spoofing. Withholding the link and making it single-use raise the bar; they do
+  not stop a process that wins the race to the link, reads the browser's memory, or binds
+  its own lookalike port.
+- **An agent with an unrestricted shell is out of reach.** Running as you, it can read
+  files Veil writes (including a `.env` destination), browser state and MCP logs. No page
+  design fixes that. Run the agent sandboxed — for example Claude Code's sandboxed Bash,
+  with loopback and the MCP log directories outside what it may reach.
 - **Veil does not audit the destination.** If you authorize a credential into a Firestore
   document, Veil writes it there and tells you it is a bad idea; it does not stop you.
 - **Timeouts are provider-level.** Veil cannot cancel a blocking SDK call from
@@ -279,11 +353,12 @@ cannot relax a policy:
 | `VEIL_REQUEST_TTL_SECONDS` | `300` | Request expiry. |
 | `VEIL_ADAPTER_TIMEOUT_SECONDS` | `30` | Upper bound on one destination write. |
 | `VEIL_STAGE_B_FOR_MEDIUM` | `true` | Require confirmation for medium-risk operations. |
-| `VEIL_UI_HOST` / `VEIL_UI_PORT` | `127.0.0.1` / ephemeral | Secure UI bind address. |
+| `VEIL_UI_HOST` / `VEIL_UI_PORT` | `127.0.0.1` / ephemeral | Secure UI bind address. Loopback only; anything else refuses to start. |
 | `VEIL_OPEN_BROWSER` | `true` | Open the authorization window automatically. |
 | `VEIL_DISCLOSE_AUTHORIZATION_URL` | `false` | Return the authorization link to the agent. |
 | `VEIL_ENV_ALLOWED_ROOTS` | current directory | Roots the `.env` adapter may write inside. |
-| `VEIL_ALLOW_GIT_TRACKED_ENV` | `false` | Permit writing into a git-tracked env file. |
+| `VEIL_ALLOW_GIT_TRACKED_ENV` | `false` | Permit writing into a git-tracked, or new and un-ignored, env file. |
+| `VEIL_ENV_ALLOW_ANY_FILENAME` | `false` | Permit file names other than `.env` / `.env.<suffix>`. |
 | `VEIL_ENABLED_ADAPTERS` | all | Comma-separated allowlist. |
 
 ## Tests

@@ -372,6 +372,11 @@ export class SecretBroker {
     return [...this.#active.keys()];
   }
 
+  /** Whole seconds until the request expires, on the broker's own clock. */
+  secondsLeft(request: SecretRequest): number {
+    return Math.max(0, Math.floor(request.expiresAt - this.#clock()));
+  }
+
   // -- stage A ---------------------------------------------------------------
 
   /** Accept credential bytes for exactly one request (SPEC.md §18.7). */

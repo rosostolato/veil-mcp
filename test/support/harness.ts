@@ -102,26 +102,69 @@ export class Harness {
 
   // -- HTTP -------------------------------------------------------------------
 
-  async get(path: string): Promise<HttpResult> {
+  /**
+   * Behaves like the one browser Veil opened: the first GET of a link trades it
+   * for a session cookie and follows the redirect; later GETs of the same link
+   * go straight to the request page, and POSTs to `<link>/<action>` are sent to
+   * `/r/<id>/<action>` with the cookie. `{ browser: false }` sends the request
+   * as-is, with no cookie, like a second party holding the link.
+   */
+  async get(path: string, options: { browser?: boolean } = {}): Promise<HttpResult> {
     this.scanner.add('http_urls', path);
-    const response = await fetch(`${this.ui.baseUrl ?? ''}${path}`, {
-      redirect: 'manual',
-      headers: { host: '127.0.0.1' },
-    });
-    const body = await response.text();
-    this.scanner.add('ui_html', body);
-    return { status: response.status, headers: response.headers, body };
+    const browser = options.browser ?? true;
+    const link = parseLink(path);
+    if (browser && link && this.#sessions.has(link.requestId)) {
+      return this.#send(`/r/${link.requestId}`, { method: 'GET' });
+    }
+    const result = await this.#send(path, { method: 'GET' }, browser);
+    if (browser && link && result.status === 303 && this.#sessions.has(link.requestId)) {
+      return this.#send(result.headers.get('location') ?? '/', { method: 'GET' });
+    }
+    return result;
   }
 
-  async post(path: string, fields: Record<string, string>): Promise<HttpResult> {
+  async post(
+    path: string,
+    fields: Record<string, string>,
+    options: { browser?: boolean } = {},
+  ): Promise<HttpResult> {
     this.scanner.add('http_urls', path);
-    const body = new URLSearchParams(fields).toString();
+    const browser = options.browser ?? true;
+    let target = path;
+    const action = /^\/r\/([^/]+)\/[^/]+\/([a-z]+)$/.exec(path);
+    if (browser && action) {
+      const linkPath = path.slice(0, path.lastIndexOf('/'));
+      if (!this.#sessions.has(action[1] as string)) await this.get(linkPath);
+      if (this.#sessions.has(action[1] as string)) target = `/r/${action[1]}/${action[2]}`;
+    }
+    return this.#send(
+      target,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(fields).toString(),
+      },
+      browser,
+    );
+  }
+
+  readonly #sessions = new Map<string, string>();
+
+  async #send(path: string, init: RequestInit, browser = true): Promise<HttpResult> {
+    const requestId = /^\/r\/([^/?]+)/.exec(path)?.[1];
+    const headers: Record<string, string> = {
+      host: '127.0.0.1',
+      ...(init.headers as Record<string, string> | undefined),
+    };
+    const session = requestId ? this.#sessions.get(requestId) : undefined;
+    if (browser && session) headers.cookie = `veil_session=${session}`;
     const response = await fetch(`${this.ui.baseUrl ?? ''}${path}`, {
-      method: 'POST',
+      ...init,
       redirect: 'manual',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', host: '127.0.0.1' },
-      body,
+      headers,
     });
+    const cookie = /veil_session=([^;]+)/.exec(response.headers.get('set-cookie') ?? '')?.[1];
+    if (browser && cookie && requestId) this.#sessions.set(requestId, cookie);
     const text = await response.text();
     if (response.status !== 303) this.scanner.add('ui_html', text);
     return { status: response.status, headers: response.headers, body: text };
@@ -144,7 +187,17 @@ export class Harness {
     const page = await this.get(path);
     const token = /name="confirm_token" value="([^"]+)"/.exec(page.body)?.[1];
     if (!token) throw new Error('stage B page did not render a confirmation token');
-    return this.post(`${path}/confirm`, { confirm_token: token });
+    const name = /data-expect="([^"]*)"/.exec(page.body)?.[1];
+    if (name === undefined) throw new Error('stage B page did not render a confirmation name');
+    return this.post(`${path}/confirm`, {
+      confirm_token: token,
+      confirm_name: name
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&'),
+    });
   }
 
   cancel(payload: Record<string, unknown>): Promise<HttpResult> {
@@ -174,6 +227,12 @@ export class Harness {
     this.scanner.add('application_logs', this.logText);
     this.scanner.add('audit_records', JSON.stringify(this.logRecords));
   }
+}
+
+/** `/r/<id>/<link>` — a single-use authorization link path. */
+function parseLink(path: string): { requestId: string } | null {
+  const match = /^\/r\/([^/?]+)\/([^/?]+)$/.exec(path);
+  return match ? { requestId: match[1] as string } : null;
 }
 
 export function storeArgs(overrides: Record<string, unknown> = {}): Record<string, unknown> {

@@ -10,13 +10,14 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 import type { SecretBroker, SecretRequest } from '../broker.js';
 import type { VeilConfig } from '../config.js';
 import { ErrorCode, VeilError, veilError } from '../errors.js';
-import { tokenEquals } from '../ids.js';
+import { newToken, tokenEquals } from '../ids.js';
 import { AuditLogger, getLogger } from '../logging.js';
-import { RequestState } from '../model.js';
+import { RequestState, isTerminal } from '../model.js';
 import { MAX_SECRET_BYTES, wipe } from '../secretBuffer.js';
 import * as render from './render.js';
 
@@ -56,6 +57,8 @@ export class SecureInputUI {
   readonly log: AuditLogger;
   #server: Server | null = null;
   #baseUrl: string | null = null;
+  /** request id → session token, set when the single-use link is first opened. */
+  readonly #sessions = new Map<string, string>();
 
   constructor(
     readonly broker: SecretBroker,
@@ -70,13 +73,15 @@ export class SecureInputUI {
   }
 
   async start(): Promise<string> {
+    // The Host check is a browser defence only; any LAN client can send
+    // `Host: 127.0.0.1`. Binding anywhere but loopback would expose the window.
+    if (!isLoopbackBindAddress(this.config.uiHost)) {
+      throw new Error('VEIL_UI_HOST must be a loopback address (127.0.0.1, ::1 or localhost).');
+    }
     const server = createServer((request, response) => {
       this.#handle(request, response).catch(() => {
         this.#sendPage(response, 500, (nonce) =>
-          render.messagePage('Error', 'The request could not be completed.', {
-            nonce,
-            identity: this.identity,
-          }),
+          render.messagePage('Error', 'The request could not be completed.', { nonce }),
         );
       });
     });
@@ -98,29 +103,34 @@ export class SecureInputUI {
     this.broker.setAuthorizationNotifier((requestId, url) => {
       this.present(requestId, url);
     });
-    this.log.event('ui_started', {
-      component: 'ui',
-      detail: { url: this.#baseUrl, identity: this.identity },
-    });
+    // Neither the identity phrase nor any link is logged: MCP hosts persist
+    // stderr to files any process running as the user can read.
+    this.log.event('ui_started', { component: 'ui', detail: { url: this.#baseUrl } });
     return this.#baseUrl;
   }
 
   /**
    * Show a new request to the human, not to the agent.
    *
-   * The URL is printed to Veil's own console — the operator's channel — and,
-   * unless disabled, opened directly in the user's browser. It is not returned
-   * through MCP by default (SPEC.md §4.2, §7).
+   * The link is opened directly in the user's browser and is not returned
+   * through MCP by default (SPEC.md §4.2, §7). It is written to the log only
+   * when the browser could not be opened, because the human then has no other
+   * way in; the link is single-use, so a copy that leaks after the human opened
+   * it is dead, and one used first by someone else raises an alarm page.
    */
   present(requestId: string, url: string): void {
     this.log.event('authorization_requested', {
       request_id: requestId,
       component: 'ui',
-      detail: { url, identity: this.identity },
+      detail: { link_fingerprint: linkFingerprint(url) },
     });
-    if (!this.config.openBrowser) return;
+    if (!this.config.openBrowser) {
+      this.#handOff(requestId, url);
+      return;
+    }
     if (this.broker.activeIds().length > MAX_AUTO_OPENED_WINDOWS) {
       this.log.event('browser_open_suppressed', { request_id: requestId, component: 'ui' });
+      this.#handOff(requestId, url);
       return;
     }
     // Belt and braces: the URL is generated here, but nothing that reaches a
@@ -142,15 +152,18 @@ export class SecureInputUI {
       const child = spawn(opener.command, opener.args, { stdio: 'ignore', detached: true });
       child.on('error', () => {
         this.log.event('browser_open_failed', { request_id: requestId, component: 'ui' });
+        this.#handOff(requestId, url);
       });
       child.unref();
     } catch {
       this.log.event('browser_open_failed', { request_id: requestId, component: 'ui' });
+      this.#handOff(requestId, url);
     }
   }
 
   async stop(): Promise<void> {
     this.broker.setAuthorizationNotifier(null);
+    this.#sessions.clear();
     const server = this.#server;
     this.#server = null;
     if (server) {
@@ -166,16 +179,35 @@ export class SecureInputUI {
 
   // -- request handling ------------------------------------------------------
 
+  /**
+   * Routes:
+   *
+   * - `GET  /r/<id>/<link>`        — the single-use link: trades itself for a session cookie
+   * - `GET  /r/<id>`               — the request page (cookie)
+   * - `POST /r/<id>/<action>`      — submit, confirm, cancel (cookie)
+   * - `POST /r/<id>/<link>/cancel` — cancel with the link alone, from the "already opened" alarm
+   */
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (!this.#hostOk(request)) {
       this.#errorPage(response, 400, 'Invalid Host header.');
       return;
     }
-    const parts = splitPath(request.url ?? '/');
+    let parts: string[];
+    try {
+      parts = splitPath(request.url ?? '/');
+    } catch {
+      this.#errorPage(response, 400, 'Malformed address.');
+      return;
+    }
 
     if (request.method === 'GET') {
       if (parts.length === 3 && parts[0] === 'r') {
-        this.#view(response, parts[1] as string, parts[2] as string);
+        this.#bootstrap(response, parts[1] as string, parts[2] as string);
+        return;
+      }
+      if (parts.length === 2 && parts[0] === 'r') {
+        const mismatch = (request.url ?? '').endsWith('?mismatch=1');
+        this.#view(request, response, parts[1] as string, mismatch);
         return;
       }
       this.#errorPage(response, 404, 'Nothing to see here.');
@@ -186,12 +218,19 @@ export class SecureInputUI {
       this.#errorPage(response, 405, 'Unsupported method.');
       return;
     }
-    if (parts.length !== 4 || parts[0] !== 'r') {
+    if (!this.#originOk(request)) {
+      this.log.security('ui_cross_origin_post', { component: 'ui' });
+      this.#errorPage(response, 403, 'This form can only be sent from Veil’s own window.');
+      return;
+    }
+    const linkCancel = parts.length === 4 && parts[0] === 'r' && parts[3] === 'cancel';
+    if (!(parts.length === 3 && parts[0] === 'r') && !linkCancel) {
       this.#errorPage(response, 404, 'Nothing to see here.');
       return;
     }
 
-    const [, requestId, token, action] = parts as [string, string, string, string];
+    const requestId = parts[1] as string;
+    const action = linkCancel ? 'link-cancel' : (parts[2] as string);
     const declared = Number(request.headers['content-length'] ?? '0');
     if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
       // Do not read a hostile body; answer and drop the connection.
@@ -207,17 +246,27 @@ export class SecureInputUI {
       this.#errorPage(response, 413, 'The submitted value is too large.');
       return;
     }
+    let location = `/r/${encodeURIComponent(requestId)}`;
     try {
       switch (action) {
         case 'submit':
-          await this.#submit(requestId, token, body);
+          await this.#submit(this.#authenticated(request, requestId), body);
           break;
         case 'confirm':
-          await this.#confirm(requestId, token, body);
+          if (!(await this.#confirm(this.#authenticated(request, requestId), body))) {
+            location += '?mismatch=1';
+          }
           break;
         case 'cancel':
-          this.#cancel(requestId, token);
+          this.#cancel(this.#authenticated(request, requestId));
           break;
+        case 'link-cancel': {
+          const link = parts[2] as string;
+          this.#cancel(this.#byLink(requestId, link));
+          // No session here: land on the link, which shows the final state.
+          location += `/${encodeURIComponent(link)}`;
+          break;
+        }
         default:
           this.#errorPage(response, 404, 'Unsupported action.');
           return;
@@ -233,11 +282,7 @@ export class SecureInputUI {
     }
 
     // POST/redirect/GET: the back button cannot resubmit a credential.
-    response.writeHead(303, {
-      location: `/r/${encodeURIComponent(requestId)}/${encodeURIComponent(token)}`,
-      'cache-control': 'no-store',
-      'content-length': '0',
-    });
+    response.writeHead(303, { location, 'cache-control': 'no-store', 'content-length': '0' });
     response.end();
   }
 
@@ -245,19 +290,107 @@ export class SecureInputUI {
     return isLoopbackHost(request.headers.host ?? '');
   }
 
-  #resolve(requestId: string, token: string): SecretRequest {
+  /**
+   * Defence in depth for POSTs: a browser always says where a form came from.
+   * Clients that send neither header are not browsers and gain nothing from
+   * omitting them; they still need the session cookie.
+   */
+  #originOk(request: IncomingMessage): boolean {
+    // `Sec-Fetch-Site` is set by the browser and cannot be forged by a page, so
+    // it decides when present. It must: the pages send `Referrer-Policy:
+    // no-referrer`, which makes browsers send `Origin: null` on their own POSTs.
+    const site = request.headers['sec-fetch-site'];
+    if (site !== undefined) return site === 'same-origin' || site === 'none';
+    const origin = request.headers.origin;
+    if (origin === undefined) return true;
+    try {
+      const parsed = new URL(origin);
+      const own = new URL(this.#baseUrl ?? 'http://127.0.0.1');
+      return parsed.protocol === 'http:' && isLoopbackHost(parsed.host) && parsed.port === own.port;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The request named by a single-use link, whether or not it was opened already. */
+  #byLink(requestId: string, link: string): SecretRequest {
     const request = this.broker.get(requestId);
-    if (!tokenEquals(request.submitToken, token) && !tokenEquals(request.confirmToken, token)) {
+    if (!tokenEquals(request.submitToken, link)) {
       this.log.security('ui_token_mismatch', { request_id: request.requestId, component: 'ui' });
       throw veilError(ErrorCode.UNAUTHORIZED, 'Invalid or expired authorization link.');
     }
     return request;
   }
 
-  #view(response: ServerResponse, requestId: string, token: string): void {
+  /** The request whose session cookie this browser holds. */
+  #authenticated(http: IncomingMessage, requestId: string): SecretRequest {
+    const request = this.broker.get(requestId);
+    const session = this.#sessions.get(request.requestId);
+    const presented = cookieValues(http.headers.cookie, SESSION_COOKIE);
+    if (!session || !presented.some((value) => tokenEquals(session, value))) {
+      this.log.security('ui_session_missing', { request_id: request.requestId, component: 'ui' });
+      throw veilError(
+        ErrorCode.UNAUTHORIZED,
+        'This page only works in the window Veil opened. Ask the agent for a new request.',
+      );
+    }
+    return request;
+  }
+
+  /**
+   * Trade the single-use link for a session cookie.
+   *
+   * The first GET burns the link and redirects to a token-free URL, so copies
+   * in logs, process lists or browser history are dead. A second GET means
+   * someone else may hold the link: show an alarm instead of the request.
+   */
+  #bootstrap(response: ServerResponse, requestId: string, link: string): void {
     let request: SecretRequest;
     try {
-      request = this.#resolve(requestId, token);
+      request = this.#byLink(requestId, link);
+    } catch (error) {
+      if (error instanceof VeilError) {
+        this.#errorPage(response, STATUS_FOR_CODE[error.public.code] ?? 400, error.public.message);
+        return;
+      }
+      throw error;
+    }
+    if (isTerminal(request.state)) {
+      this.#sendPage(response, 200, (nonce) =>
+        render.statusPage(request, { nonce, identity: this.identity }),
+      );
+      return;
+    }
+    if (this.#sessions.has(request.requestId)) {
+      this.log.security('ui_link_reused', { request_id: request.requestId, component: 'ui' });
+      const cancelPath = `/r/${request.requestId}/${link}/cancel`;
+      this.#sendPage(response, 409, (nonce) => render.linkReusedPage({ nonce, cancelPath }));
+      return;
+    }
+    const session = newToken();
+    this.#sessions.set(request.requestId, session);
+    this.log.event('ui_link_opened', { request_id: request.requestId, component: 'ui' });
+    response.writeHead(303, {
+      location: `/r/${request.requestId}`,
+      'set-cookie':
+        `${SESSION_COOKIE}=${session}; Path=/r/${request.requestId}; HttpOnly; SameSite=Lax; ` +
+        `Max-Age=${Math.max(60, this.config.requestTtlSeconds * 2)}`,
+      'cache-control': 'no-store',
+      'referrer-policy': 'no-referrer',
+      'content-length': '0',
+    });
+    response.end();
+  }
+
+  #view(
+    http: IncomingMessage,
+    response: ServerResponse,
+    requestId: string,
+    mismatch: boolean,
+  ): void {
+    let request: SecretRequest;
+    try {
+      request = this.#authenticated(http, requestId);
     } catch (error) {
       if (error instanceof VeilError) {
         this.#errorPage(response, STATUS_FOR_CODE[error.public.code] ?? 400, error.public.message);
@@ -266,10 +399,11 @@ export class SecureInputUI {
       throw error;
     }
 
-    const basePath = `/r/${request.requestId}/${token}`;
+    const basePath = `/r/${request.requestId}`;
+    const secondsLeft = this.broker.secondsLeft(request);
     if (request.state === RequestState.AWAITING_SECRET_AUTHORIZATION) {
       this.#sendPage(response, 200, (nonce) =>
-        render.stageAPage(request, { nonce, identity: this.identity, basePath }),
+        render.stageAPage(request, { nonce, identity: this.identity, basePath, secondsLeft }),
       );
       return;
     }
@@ -279,7 +413,9 @@ export class SecureInputUI {
           nonce,
           identity: this.identity,
           basePath,
+          secondsLeft,
           confirmToken: request.confirmToken,
+          mismatch,
         }),
       );
       return;
@@ -289,8 +425,7 @@ export class SecureInputUI {
     );
   }
 
-  async #submit(requestId: string, token: string, body: Buffer): Promise<void> {
-    const request = this.#resolve(requestId, token);
+  async #submit(request: SecretRequest, body: Buffer): Promise<void> {
     const value = formValue(body, 'secret');
     try {
       await this.broker.submitSecret(request.requestId, request.submitToken, value);
@@ -304,15 +439,40 @@ export class SecureInputUI {
     });
   }
 
-  async #confirm(requestId: string, token: string, body: Buffer): Promise<void> {
-    const request = this.#resolve(requestId, token);
+  /**
+   * Stage B. Returns false when the typed destination name did not match, so the
+   * human is sent back to retype it; nothing is executed in that case.
+   *
+   * The name is checked only once the confirmation token is known to be good:
+   * a bad token keeps failing through the broker exactly as before.
+   */
+  async #confirm(request: SecretRequest, body: Buffer): Promise<boolean> {
     const provided = formValue(body, 'confirm_token').toString('utf8');
+    if (tokenEquals(request.confirmToken, provided)) {
+      const typed = formValue(body, 'confirm_name').toString('utf8').trim();
+      if (typed !== render.confirmationPhrase(request)) {
+        this.log.event('ui_confirmation_mismatch', {
+          request_id: request.requestId,
+          component: 'ui',
+        });
+        return false;
+      }
+    }
     await this.broker.confirmExecution(request.requestId, provided);
+    return true;
   }
 
-  #cancel(requestId: string, token: string): void {
-    const request = this.#resolve(requestId, token);
-    this.broker.cancel(request.requestId, { token, reason: 'user_cancelled' });
+  #cancel(request: SecretRequest): void {
+    this.broker.cancel(request.requestId, { token: request.submitToken, reason: 'user_cancelled' });
+  }
+
+  /** Write the link where the operator can find it, when no browser was opened. */
+  #handOff(requestId: string, url: string): void {
+    this.log.event('authorization_link_for_operator', {
+      request_id: requestId,
+      component: 'ui',
+      detail: { url },
+    });
   }
 
   #sendPage(response: ServerResponse, status: number, build: (nonce: string) => string): void {
@@ -324,7 +484,7 @@ export class SecureInputUI {
       html = render.messagePage(
         'Blocked',
         'The page could not be rendered safely and was suppressed.',
-        { nonce, identity: this.identity },
+        { nonce },
       );
       code = 500;
     }
@@ -338,9 +498,31 @@ export class SecureInputUI {
 
   #errorPage(response: ServerResponse, status: number, message: string): void {
     this.#sendPage(response, status, (nonce) =>
-      render.messagePage('Credential request', message, { nonce, identity: this.identity }),
+      render.messagePage('Credential request', message, { nonce }),
     );
   }
+}
+
+const SESSION_COOKIE = 'veil_session';
+
+/** Every value of one cookie in a `Cookie` header (one per matching path). */
+function cookieValues(header: string | undefined, name: string): string[] {
+  if (!header) return [];
+  return header
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(`${name}=`))
+    .map((part) => part.slice(name.length + 1));
+}
+
+/** A short, non-reversible handle for a link, so logs can correlate without holding it. */
+function linkFingerprint(url: string): string {
+  const token = url.slice(url.lastIndexOf('/') + 1);
+  return createHash('sha256').update(token).digest('hex').slice(0, 8);
+}
+
+function isLoopbackBindAddress(host: string): boolean {
+  return host === 'localhost' || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
 
 /**

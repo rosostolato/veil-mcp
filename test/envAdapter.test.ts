@@ -152,6 +152,41 @@ describe('env-file adapter', () => {
     expect(content).toContain('KEEP=1');
   });
 
+  it('confirms by the variable name, not the directory path', async () => {
+    writeFileSync(join(root, '.env'), 'API_TOKEN=old-value\n');
+
+    const payload = await harness.callTool('secret_store', args({ write_mode: 'replace' }));
+    await harness.submitSecret(payload, canary.value);
+    const page = await harness.get(harness.pathFor(payload));
+
+    expect(page.body).toContain('data-expect=".env:API_TOKEN"');
+    expect(page.body).toContain('Save to .env</button>');
+    expect(page.body).not.toContain(`data-expect="${root}`);
+  });
+
+  it('accepts only env file names by default', async () => {
+    for (const path of ['public/robots.txt', 'config.json', 'secrets', '.envrc']) {
+      const payload = await harness.callTool('secret_store', args({ target: { path } }));
+      expect(payload.status).toBe('failed');
+      expect(payload.code).toBe('DESTINATION_NOT_PERMITTED');
+    }
+    for (const path of ['.env', '.env.local', '.env.production']) {
+      const payload = await harness.callTool('secret_store', args({ target: { path } }));
+      expect(payload.status).not.toBe('failed');
+    }
+  });
+
+  it('refuses a new env file that git would not ignore', async () => {
+    git(root, 'init', '-q');
+    const refused = await harness.callTool('secret_store', args());
+    expect(refused.status).toBe('failed');
+    expect(String(refused.message)).toContain('.gitignore');
+
+    writeFileSync(join(root, '.gitignore'), '.env\n');
+    const allowed = await harness.callTool('secret_store', args());
+    expect(allowed.status).not.toBe('failed');
+  });
+
   it('leaves the original intact when the write is interrupted', async () => {
     const envPath = join(root, '.env');
     writeFileSync(envPath, 'EXISTING=keep-me\n');
@@ -202,6 +237,7 @@ describe('env-file adapter', () => {
 
   it('keeps the credential out of every spawned argv', async () => {
     git(root, 'init', '-q');
+    writeFileSync(join(root, '.gitignore'), '.env\n');
     const spawned: string[][] = [];
     const childProcess = await import('node:child_process');
     const original = childProcess.default.execFile;

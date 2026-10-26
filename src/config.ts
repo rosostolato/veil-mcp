@@ -59,6 +59,8 @@ export interface VeilConfig {
   // `.env` adapter
   readonly envAllowedRoots: readonly string[];
   readonly allowGitTrackedEnv: boolean;
+  /** Permit file names other than `.env` / `.env.<suffix>`. */
+  readonly envAllowAnyFilename: boolean;
 
   // Destination gating (SPEC.md §16: arbitrary-network is off by default and is
   // not implemented at all in this version).
@@ -98,6 +100,7 @@ export function defaultConfig(overrides: Partial<VeilConfig> = {}): VeilConfig {
     openBrowser: true,
     discloseAuthorizationUrl: false,
     allowGitTrackedEnv: false,
+    envAllowAnyFilename: false,
     productionMarkers: [...DEFAULT_PRODUCTION_MARKERS],
     stagingMarkers: [...DEFAULT_STAGING_MARKERS],
     developmentMarkers: [...DEFAULT_DEVELOPMENT_MARKERS],
@@ -127,6 +130,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): VeilConfig 
           .map((entry) => canonicalRoot(entry))
       : [canonicalRoot(process.cwd())],
     allowGitTrackedEnv: boolean(env.VEIL_ALLOW_GIT_TRACKED_ENV, false),
+    envAllowAnyFilename: boolean(env.VEIL_ENV_ALLOW_ANY_FILENAME, false),
     ...(env.VEIL_ENABLED_ADAPTERS
       ? {
           enabledAdapters: env.VEIL_ENABLED_ADAPTERS.split(',')

@@ -73,7 +73,8 @@ describe('fuzzed metadata', () => {
 
       const body = (await harness.get(harness.pathFor(payload))).body;
       const lowered = body.toLowerCase();
-      expect(lowered).not.toContain('<script');
+      // Only Veil's own nonce'd script, never one carried in by metadata.
+      expect(lowered.split('<script').length - 1).toBe(1);
       expect(lowered).not.toContain('<img');
       if (hostile.includes('<')) expect(body).toContain('&lt;');
       for (const character of ['\x1b', '\x00', BIDI_OVERRIDE, ISOLATE_OPEN, ZERO_WIDTH]) {

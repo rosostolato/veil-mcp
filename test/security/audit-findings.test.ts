@@ -280,12 +280,16 @@ describe('oversized request bodies', () => {
         environment: 'development',
       });
 
+      const opened = await fetch(`${harness.ui.baseUrl ?? ''}${harness.pathFor(payload)}`, {
+        redirect: 'manual',
+      });
+      const cookie = (opened.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
       const response = await fetch(
-        `${harness.ui.baseUrl ?? ''}${harness.pathFor(payload)}/submit`,
+        `${harness.ui.baseUrl ?? ''}/r/${payload.request_id as string}/submit`,
         {
           method: 'POST',
           redirect: 'manual',
-          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          headers: { 'content-type': 'application/x-www-form-urlencoded', cookie },
           // A stream has no content-length, so the declared-size check cannot fire.
           body: new ReadableStream({
             start(controller) {

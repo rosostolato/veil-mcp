@@ -22,6 +22,7 @@ import { promisify } from 'node:util';
 
 import { ErrorCode, publicError, type PublicError } from '../errors.js';
 import {
+  DESTINATION_CLASS_NOTICE,
   DestinationClass,
   Environment,
   RiskLevel,
@@ -39,6 +40,7 @@ import { SecretDestinationAdapter, adapterError, scalarString, type JsonSchema }
 const execFileAsync = promisify(execFile);
 
 export const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+export const ENV_FILENAME_PATTERN = /^\.env(\.[A-Za-z0-9_.-]+)?$/;
 const DEFAULT_FILENAME = '.env';
 const GIT_TIMEOUT_MS = 5_000;
 
@@ -93,6 +95,8 @@ export class EnvFileAdapter extends SecretDestinationAdapter {
 
     const resolved = this.#resolvePath(scalarString(target.path) || DEFAULT_FILENAME);
     const parsed = parse(resolved);
+    const root = this.config.envAllowedRoots.find((entry) => isWithin(parsed.dir, entry));
+    const relativePath = root ? relative(root, resolved) : parsed.base;
 
     return Promise.resolve(
       normalizedTarget({
@@ -102,8 +106,11 @@ export class EnvFileAdapter extends SecretDestinationAdapter {
         accountLabel: parsed.dir,
         resourceLabel: `${parsed.base} → ${key}`,
         environment: this.environmentFor(context.environmentHint, resolved, key),
-        fields: { path: resolved, key },
-        warnings: ['This destination stores the credential as plaintext on this machine.'],
+        fields: { path: resolved, key, relative: relativePath },
+        warnings: [
+          DESTINATION_CLASS_NOTICE[DestinationClass.LOCAL_PLAINTEXT] ?? '',
+          'Any program running as you can read this file, including the agent if it has a shell.',
+        ],
       }),
     );
   }
@@ -131,6 +138,14 @@ export class EnvFileAdapter extends SecretDestinationAdapter {
     const parsed = parse(candidate);
     if (!parsed.base || parsed.base === '.' || parsed.base === '..') {
       throw adapterError(ErrorCode.INVALID_TARGET, 'The destination path is not a file.');
+    }
+    // Only env files by default: anything else under a root (`public/robots.txt`,
+    // a build artefact) may be served, bundled or committed.
+    if (!ENV_FILENAME_PATTERN.test(parsed.base) && !this.config.envAllowAnyFilename) {
+      throw adapterError(
+        ErrorCode.DESTINATION_NOT_PERMITTED,
+        'Only files named .env or .env.<suffix> may receive a credential.',
+      );
     }
 
     // Canonicalise the *parent*, following symlinks, so a linked directory
@@ -207,7 +222,16 @@ export class EnvFileAdapter extends SecretDestinationAdapter {
     }
 
     const exists = await fileExists(path);
-    if (exists && !(await gitIgnores(path))) {
+    const ignore = await gitIgnoreStatus(path);
+    if (!exists && ignore === 'not-ignored' && !this.config.allowGitTrackedEnv) {
+      // A new file nobody ignores is one `git add .` away from being committed.
+      return {
+        ok: false,
+        code: ErrorCode.DESTINATION_NOT_PERMITTED,
+        message: 'This new file is not git-ignored. Add it to .gitignore first.',
+      };
+    }
+    if (exists && ignore === 'not-ignored') {
       notes.push('This file does not appear to be git-ignored.');
     }
 
@@ -429,8 +453,11 @@ async function gitTracks(path: string): Promise<boolean> {
   return (await git(path, ['ls-files', '--error-unmatch'])) === 0;
 }
 
-async function gitIgnores(path: string): Promise<boolean> {
-  return (await git(path, ['check-ignore', '-q'])) === 0;
+/** `git check-ignore` exits 0 when ignored, 1 when not, and 128 outside a repository. */
+async function gitIgnoreStatus(path: string): Promise<'ignored' | 'not-ignored' | 'no-repo'> {
+  const code = await git(path, ['check-ignore', '-q']);
+  if (code === 0) return 'ignored';
+  return code === 1 ? 'not-ignored' : 'no-repo';
 }
 
 export const __testing = { isWithin, findKeyLine, quote, sep };

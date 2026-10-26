@@ -62,9 +62,16 @@ describe('replay protection', () => {
     const payload = await harness.callTool('secret_store', storeArgs());
     const requestId = payload.request_id as string;
 
-    const response = await harness.post(`/r/${requestId}/not-the-token/submit`, {
-      secret: canary.value,
-    });
+    const wrongLink = await harness.get(`/r/${requestId}/not-the-token`);
+    expect(wrongLink.status).toBe(403);
+    expect(wrongLink.headers.get('set-cookie')).toBeNull();
+
+    // Without the session the link would have set, the action route refuses.
+    const response = await harness.post(
+      `/r/${requestId}/submit`,
+      { secret: canary.value },
+      { browser: false },
+    );
     expect(response.status).toBe(403);
     expect((await harness.status(requestId)).state).toBe(
       RequestState.AWAITING_SECRET_AUTHORIZATION,

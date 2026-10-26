@@ -66,6 +66,12 @@ shell string, a global, a cache, or anything serialized.
 | AUTH-007/008 cancellation | `SecretBroker.cancel` → zeroize | `authorization` › *AUTH-007*, *AUTH-008* |
 | §10 agents cannot downgrade risk | monotonic escalation only | `authorization` › *§10 an agent cannot downgrade risk* |
 | §4.2 authorization is out of band | link goes to the browser, not to MCP | `test/security/authorization/out-of-band.test.ts` |
+| Single-use link | first GET trades the link for an `HttpOnly` session cookie (`SecureInputUI.#bootstrap`); every page and action requires it (`#authenticated`) | `ui` › *trades the link for an HttpOnly session cookie…*, *burns the link on first use…* |
+| No capability or identity in logs | `authorization_requested` carries a link fingerprint; full link only when no browser opened (`#handOff`) | `ui` › *keeps the identity phrase and the link fingerprint-only…* |
+| Same-origin POSTs only | `#originOk` (`Origin`, `Sec-Fetch-Site`) | `ui` › *refuses a cross-site POST even with the session cookie* |
+| Stage B typed confirmation | server compares `confirm_name` with `confirmationPhrase` before executing | `ui` › *writes nothing until the destination name is typed at stage B* |
+| Loopback bind only | `isLoopbackBindAddress` at `start()` | `ui` › *refuses to bind anywhere but loopback* |
+| `.env` names and git hygiene | `ENV_FILENAME_PATTERN`; new un-ignored file refused in `preflight` | `envAdapter` › *accepts only env file names…*, *refuses a new env file that git would not ignore* |
 
 ### State machine, replay, concurrency (SPEC.md §14, §18.5–§18.7, §28–§31)
 
