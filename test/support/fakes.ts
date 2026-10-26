@@ -287,7 +287,8 @@ export class FakeFirestore {
       // Real PATCH semantics: only the path named in updateMask changes, so a
       // dotted mask sets one leaf inside a map and keeps its siblings.
       const mask = decodeURIComponent(
-        new URL(request.url, 'https://fake.invalid').searchParams.get('updateMask.fieldPaths') ?? '',
+        new URL(request.url, 'https://fake.invalid').searchParams.get('updateMask.fieldPaths') ??
+          '',
       );
       const segments = mask.split('.');
       const incoming = (request.body as { fields: Record<string, unknown> }).fields;
